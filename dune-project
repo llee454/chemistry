@@ -22,3 +22,4 @@
   conf-gsl
  )
 )
+(using coq 0.2)

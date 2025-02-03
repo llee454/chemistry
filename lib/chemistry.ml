@@ -1,6 +1,8 @@
 open! Core
 open Float
-
+ 
+include Coq_chemistry
+ 
 (** The number of meters spanned by an angstrom *)
 let angstrom = 1e-10
 

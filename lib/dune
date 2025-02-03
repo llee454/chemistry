@@ -1,7 +1,12 @@
 (library
   (name chemistry)
-  ; note that the gsl library is provided by the conf-gsl library.
-  (libraries core ocaml_math)
+  (libraries core)
   (inline_tests)
   (preprocess (pps ppx_jane ppx_here))
+)
+(coq.extraction
+  (prelude extraction)
+  (extracted_modules coq_chemistry)
+  (theories coq)
+  (libraries core)
 )
