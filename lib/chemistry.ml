@@ -1,5 +1,11 @@
+(**
+  The equations presented here are from:
+
+  1. Pauling, Linus. 1988. "General Chemistry." Dover.
+*)
 open! Core
 open Float
+open! Ocaml_math
  
 include Coq_chemistry
  
@@ -11,7 +17,7 @@ let angstroms_to_meters = ( * ) angstrom
 let meters_to_angstroms x = x / angstrom
 
 (** Planck's constant measured in Joule second *)
-let plancks_constant = 0.66252e-33
+let plancks_constant = 6.6252e-34
 
 let planck_bar = plancks_constant / (2. * pi)
 
@@ -50,10 +56,10 @@ let stoney_to_coulomb = 1.054822e-5
 let columnb_to_stoney = 1. / stoney_to_coulomb
 
 (** The mass of an electron in kg. *)
-let electron_mass_kg = 0.91083e-30
+let electron_mass_kg = 9.1083e-31
 
 (** The charge of an electron in coulombs. *)
-let electron_charge_c = 0.160206e-18
+let electron_charge_c = 1.60206e-19
 
 let electron_charge_s = electron_charge_c * columnb_to_stoney
 
@@ -192,14 +198,18 @@ module Bohr = struct
     for every electron that fully shields an outer electron. Certain
     outer orbits however can "penetrate" within inner orbits. When
     this happens the shielding constant s will be less than one.
-  *)
-  (* let closest_radius ~z ~n l =
-       (square n) * bohr_radius_constant* (1.5 - (((square l) + l)/(2. * square n)))/z
 
-     let%expect_test "closest_radius" =
-       (closest_radius ~z:1. ~n:3. 2.) / angstrom |> printf !"%0.4f A\n";
-       bohr_radius_constant / angstrom |> printf !"%0.4f";
-       [%expect {||}] *)
+    WARNING: in [1] Pauling gives a value of 2.02 Å for the unit test
+    on page 143. This function may be incorrect, but I cannot find any
+    discrepancy between it and the equation printed in the book. I assume
+    that the text itself contains a misprint.
+  *)
+  let closest_radius ?electron_mass ~z ~n l =
+    (square n)/z * (bohr_radius_constant ?electron_mass ()) * (1.5 - ((square l + l)/(2. * square n)))
+
+  let%expect_test "closest_radius" =
+    (closest_radius ~electron_mass:(reduced_electron_mass (19.0 * proton_mass)) ~z:1. ~n:3. 2.) / angstrom |> printf !"%0.4f Å\n";
+    [%expect {| 5.5565 Å |}]
 
   (** The energy of an electron in the 1s orbital of a hydrogen atom. *)
   let electron_energy_constant = electron_mass_kg * int_pow electron_charge_s 4 / (2. * square planck_bar)
@@ -327,6 +337,91 @@ module Electronegativity = struct
       "Np", 1.3 (* skipping the elements between Np and No *);
     ]
     |> String.Map.of_alist_exn
+
+  module Ionic = struct
+
+    (**
+      This array represents the empirically observed correlation between the
+      electronegativity difference between two atoms linked by a covalent bond
+      and the degree to which that bond is ionic.
+
+      See [1] Table 6.5 page 184.
+    *)
+    let empirical_degree_ionic =
+      [|
+        [| 0.2;  0.01 |];
+        [| 0.4;  0.04 |];
+        [| 0.6;  0.09 |];
+        [| 0.8;  0.15 |];
+        [| 1.0;  0.22 |];
+        [| 1.2;  0.3  |];
+        [| 1.4;  0.39 |];
+        [| 1.6;  0.47 |];
+        [| 1.8;  0.55 |];
+        [| 2.0;  0.63 |];
+        [| 2.2;  0.7  |];
+        [| 2.4;  0.76 |];
+        [| 2.6;  0.82 |];
+        [| 2.8;  0.86 |];
+        [| 3.0;  0.89 |];
+        [| 3.2;  0.92 |];
+      |]
+
+
+    let get_coeffs =
+      let n = Array.length empirical_degree_ionic
+      and f Nonlinear_fit.{ks; x} =
+        match ks with
+        | [| k0; k1 |] ->
+          k0 * cdf_gaussian_p ~x:(log (k1 * x)) ~std:1.0
+        | _ -> failwiths ~here:[%here] "Error: an internal error occured." ks [%sexp_of: float array]
+      in
+      let xs = Array.init n ~f:(fun i -> empirical_degree_ionic.(i).(0))
+      and ys = Array.init n ~f:(fun i -> empirical_degree_ionic.(i).(1))
+      in
+      Nonlinear_fit.f ~f ~ks_init:[|1.0; 1.0|] ~xs ~ys 
+
+    let%expect_test "get_coeffs" =
+      printf !"%{sexp: float array}" get_coeffs;
+      [%expect {| (1.8615176504138462 0.32202559402545522) |}]
+
+    (**
+      Accepts one argument: [electronegativity_diff] which represents the
+      absolute value of the difference in eletronegativity between two atoms
+      linked by a covalent bond; and returns an approximation of the degree
+      to which that bond is ionic - i.e. the degree to which the shared
+      electrons disproportionately orbit the more electronegative of the
+      two atoms.contents
+
+      Note: this function is a regression fit for the empirical table presented
+      in [1] Table 6.5 page 184. It is accurate to within 3.4% for all values
+      less than and equal to 3.2 and the error increases as the difference
+      in electronegativity increases.
+    *)
+    let get_approx_degree_ionic electronegativity_diff =
+      if [%equal: float] electronegativity_diff 0.0
+      then 0.0
+      else
+        let k0 = 1.8615176504138462
+        and k1 = 0.32202559402545522
+        in
+        k0 * cdf_gaussian_p ~x:(log (k1 * electronegativity_diff)) ~std:1.0
+
+    let%expect_test "get_approx_degree_ionic" =
+      Array.map empirical_degree_ionic ~f:(function
+        | [|electronegativity_diff; degree_ionic|] ->
+          abs (degree_ionic - get_approx_degree_ionic electronegativity_diff)
+        | xs -> failwiths ~here:[%here] "Error: an internal error occured." xs [%sexp_of: float array])
+      |> printf !"%{sexp: float array}";
+      [%expect {|
+        (0.0043259164570501416 0.0023772825511848006 0.0032495216360882706
+         0.012895802386018951 0.019355873781161714 0.018044520067233949
+         0.0061804344766568375 0.0021304889854154019 0.0050208292778404218
+         0.015742256620153605 0.020225121515539013 0.018489778073564778
+         0.020452977300009612 0.0059707800194609417 0.015134013368263921
+         0.03305434060395529)
+        |}]
+  end
 end
 
 (**

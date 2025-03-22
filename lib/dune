@@ -1,8 +1,9 @@
 (library
   (name chemistry)
-  (libraries core)
+  (libraries core ocaml_math)
   (inline_tests)
   (preprocess (pps ppx_jane ppx_here))
+  (c_library_flags -fPIC -I. -I/usr/include/gsl/ -L/usr/lib/x86_64-linux-gnu -lgsl -lgslcblas)
 )
 (coq.extraction
   (prelude extraction)
