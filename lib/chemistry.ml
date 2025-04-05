@@ -572,6 +572,156 @@ module Heat_of_formation = struct
   let is_unstable qf = qf < 0.0
 end
 
+(**
+  This module defines functions that use the electroneutrality principle to
+  devise chemical formula for molecules.
+
+  Given a set of n atoms that comprise a molecule [a_0, a_1, ..., a_{n-1}],
+  we can:
+  1. assign unshared electrons to individual atoms
+  2. place zero or more covalent bonds (shared pairs of electrons) between two atoms.
+
+  Every atom is described by two properties:
+  1. the number of valence electrons (the number of electrons in its outermost/"valence" shell)
+  2. its electronegativity
+
+  We use a symmetric matrix to count the number of shared electrons between each pair of atoms.
+
+  [
+    [y_{0,0}, y_{0,1}, ..., y_{0,n-1}],
+    [y_{1,0}, y_{1,1}, ..., y_{1,n-1}],
+    ...
+    [y_{n-1,0}, y_{n-1,1}, ..., y_{n-1,n-1}],
+  ]
+
+  The matrix is symmetric so the y_{i,j} = y_{j,i} for all i and j. Also, we assume that all diagonal elements y_{i,i} represent the number of unshared electrons that we assign to the ith atom.
+
+  Because the matrix is symmetric, we only consider the top right triangular entries. These can be listed in a single vector as:
+
+  [y_{0,0}, y_{0,1}, ..., y_{0,n-1}, y_{1,1}, ... y{1,n-1}, ..., y{n-1,n-1}]
+
+  We call this vector the "electron configuration vector".
+
+  Given an "electron configuration vector," we can compute the charge on each atom. For each atom a_i, we calculate m_i, the number of unshared electrons and covalent bonds involving a_i and then compute:
+
+    sum (ionic (a_i.electronegativity - a_j.electronegativity), j, n-1) - (m - a_i.num_valence_electrons)
+
+  where ionic (x, y) returns the degree to which an electron will favor an electron with electronegativity x over y. 
+
+  We use a genetic algorithm to find an electron configuration that minimizes the charge across atoms.
+*)
+module Electroneutrality = struct
+  module Atom = struct
+    type t = {
+      num_valence_electrons: int;
+      electronegativity: float; 
+    } [@@deriving sexp]
+  end
+
+  module Electron_configuration_vector = struct
+    (**
+      Accepts an electron configuration vector and returns the number of atoms represented.
+
+      n = x(x + 1)/2
+      0 = x^2 + x - 2n
+    *)
+    let get_num_atoms x =
+      let n = Array.length x in
+      Float.iround_nearest_exn @@ (sqrt (8.0*float n + 1.0) - 1.0)/2.0
+
+    (**
+      Accepts three arguments: [n], the number of atoms in an electron
+      configuration matrix; [i], a row index; [j], a column index; and returns
+      the index of the corresponding element within the associated electron
+      configuration vector.
+    *)
+    let get_index n i j =
+      let open Int in
+      let k = min i j
+      and l = max i j
+      in
+      k*n - (k*(k + 1))/2 + l
+
+    (*
+      [| 0.0; 1.0; 2.0;
+              3.0; 4.0;
+                   5.0 |]
+    *)
+    let%expect_test "get" =
+      [
+        get_index 3 0 0;
+        get_index 3 1 1;
+        get_index 3 2 2;
+        get_index 3 1 2;
+        get_index 3 2 0;
+        get_index 3 1 0;
+        get_index 3 1 2;
+      ]
+      |> printf !"%{sexp: int list}";
+      [%expect {| (0 3 5 4 2 1 4) |}]
+
+    (**
+      Accepts an electron configuration vector and returns the corresponding
+      electron configuration matrix.
+    *)
+    let get x i j = x.(get_index (get_num_atoms x) i j)
+
+
+    (**
+      Accepts two arguments: [atoms], a list of atom descriptions; and [xs],
+      an electron configuration vector; and returns the square of the charge
+      of the atoms in the described molecular configuration.
+    *)    
+    let get_charge (atoms : Atom.t array) (config : int array) =
+      Array.foldi atoms ~init:0.0 ~f:(fun i total_square_charge ai ->
+        let (ai_charge, ai_num_electrons) = Array.foldi atoms ~init:(0.0, get config i i)
+          ~f:(fun j ((ai_charge, ai_num_electrons) as acc) aj ->
+            if [%equal: int] i j
+            then acc
+            else
+              let num_shared_electrons = get config i j
+              and partial_charge = Electronegativity.Ionic.get_approx_degree_ionic @@ abs @@ ai.electronegativity - aj.electronegativity
+              and charge_sign = if ai.electronegativity < aj.electronegativity
+                then 1.0
+                else -1.0
+              in
+              (* printf "charge between %d and %d: %f (%f for %d electrons)\n" i j (charge_sign * partial_charge * float num_shared_electrons) partial_charge num_shared_electrons; *)
+              (ai_charge + charge_sign * partial_charge * float num_shared_electrons,
+               Int.(ai_num_electrons + num_shared_electrons))
+        )
+        in
+        (* printf "charge on %d: %f\n" i @@ ai_charge + float Int.(ai.num_valence_electrons - ai_num_electrons); *)
+        total_square_charge + square (ai_charge + float Int.(ai.num_valence_electrons - ai_num_electrons))
+      )
+    
+    let%expect_test "get_charge" =
+      let atoms = [|
+        (* H *) Atom.{ num_valence_electrons = 1; electronegativity = 2.1 };
+        (* C *) Atom.{ num_valence_electrons = 4; electronegativity = 2.5 };
+        (* N *) Atom.{ num_valence_electrons = 5; electronegativity = 3.0 }
+      |]
+      (* H - N --- C: *)
+      and config0 = [|
+        0; 0; 1;
+           2; 3;
+              0
+      |]
+      (* H - C --- N: *)
+      and config1 = [|
+        0; 1; 0;
+           0; 3;
+              2
+      |]
+      in
+      [|
+        get_charge atoms config0;
+        get_charge atoms config1;
+      |] |> printf !"%{sexp: float array}";
+      [%expect {| (1.0695658090848179 0.060284980182740575) |}]
+  end
+end
+
+
 module Gases = struct
   (** The Boltzmann constant "k" measured in j deg^-1. *)
   let boltzmann_constant = 1.3805E-23
