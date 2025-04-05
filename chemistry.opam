@@ -17,7 +17,7 @@ depends: [
   "ppx_jane"
   "ppx_here"
   "eio_main"
-  "ocaml_math" {= "1.0.1"}
+  "ocaml_math" {= "2.1.0"}
   "conf-gsl"
   "odoc" {with-doc}
 ]
@@ -37,5 +37,6 @@ build: [
 ]
 dev-repo: "git+https://github.com/llee454/chemistry.git"
 pin-depends: [
- ["ocaml_math.1.0.1" "git+https://github.com/llee454/ocaml_math.git"]
+#  ["ocaml_math.2.1.0" "git+https://github.com/llee454/ocaml_math.git"]
+ ["ocaml_math.2.1.0" "git+file:///home/larry/Projects/asemio_stats"]
 ]

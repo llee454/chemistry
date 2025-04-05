@@ -573,8 +573,15 @@ module Heat_of_formation = struct
 end
 
 module Gases = struct
+  (** The Boltzmann constant "k" measured in j deg^-1. *)
+  let boltzmann_constant = 1.3805E-23
+
   (** Usually denotes "R" measured in j deg^-1 mole^-1 *)
-  let gas_constant_joules = 8.3146
+  let gas_constant_joules = boltzmann_constant * mole
+
+  let%expect_test "gas_constant_joules" =
+    printf "%f" gas_constant_joules;
+    [%expect {| 8.314613 |}]
 
   (** Usually denoted "R" measured in l atm deg^-1 mole^-1 *)
   let gas_constant_atm_liters = gas_constant_joules / atmospheres_to_joule_liters 1.0
@@ -585,9 +592,6 @@ module Gases = struct
 
   (** The temperature of the standard atmosphere measured in degrees Kelvin *)
   let standard_temperature = 298.15
-
-  (** The Boltzmann constant "k" measured in j deg^-1 *)
-  let boltzmann_constant = 1.3805E-23
 
   (**
     Accepts two arguments: [num_moles] the number of moles of gas molecules;
@@ -614,6 +618,22 @@ module Gases = struct
   *)
   let get_density ~temperature ~pressure ~mass =
     (pressure * mass)/(gas_constant_atm_liters * temperature)
+
+  (**
+    The heat capacity (j deg^-1 mole^-1) of an ideal gas when volume is
+    held constant.
+
+    Note: this is typically expressed as 3/2 R.
+  *)
+  let heat_capacity_volume = 1.5 * gas_constant_joules
+
+  (**
+    The heat capacity (j deg^-1 mole^-1) of an ideal gas when the pressure
+    is held constant.
+
+    Note: this is typically expressed as 5/2 R.
+  *)
+  let heat_capacity_pressure = 2.5 * gas_constant_joules
 
   (**
     Accepts one argument [temperature] (K) and returns the most probable
@@ -716,4 +736,54 @@ module Gases = struct
     and most_probable_energy_ref = get_most_probable_energy temperature |> joules_to_electron_volts in
     printf "ref: %f calc %f err %f" most_probable_energy_ref most_probable_energy (abs (most_probable_energy_ref - most_probable_energy));
     [%expect {| ref: 0.004309 calc 0.004309 err 0.000000 |}]
+
+    (**
+      Accepts five arguments:
+      * [a] the van der Waals' a constant for the gas
+      * [b] the van der Waals' b constant for the gas
+      * [n] the number of moles
+      * [volume] the number of liters
+      * [temperature] the temperature (K)
+      and uses the van der Waals equation of state to calculate the pressure
+      of the gas.
+    *)
+    let van_der_waals_pressure ~a ~b ~n ~volume ~temperature =
+      let r = gas_constant_atm_liters
+      in
+      (n*r*temperature*(square volume) - a*(square n)*volume + a*b*(pow_int n 3))/
+      (pow_int volume 3 - b*n*square volume)
+
+    let%expect_test "van_der_waals_pressure" =
+      van_der_waals_pressure ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~temperature:295.13
+      |> printf "%f";
+      [%expect {| 13.553739 |}]
+
+    (**
+      The van_der_waals_volume is cubic in volume.contents
+
+      pv^3 - (nrt+npb)v^2 + n^2av - n^3ab = 0
+    *)
+    let van_der_waals_volume ~a ~b ~n ~pressure:(p:float) ~temperature:(t:float) =
+      let r = gas_constant_atm_liters in
+      let result = Polynomial.Cubic.solve
+        (- (n*r*t + n*p*b)/p)
+        ((square n)*a/p)
+        (- (pow_int n 3)*a*b/p)
+      in if not @@ [%equal: int] result.n 1
+      then failwiths ~here:[%here] "Error: tried to calculate the volume of a gas using the van der Waals equation of state and the equation did not have a unique real solution." (a, b, n, p, t) [%sexp_of: float * float * float * float * float]
+      else result.x0
+
+    let%expect_test "van_der_waals_volume" =
+      van_der_waals_volume ~a:1.39 ~b:0.0391 ~n:1.3 ~pressure:13.553739 ~temperature:295.13
+      |> printf "%f";
+      [%expect {| 2.300000 |}]
+
+    let van_der_waals_temperature ~a ~b ~n ~volume ~pressure =
+      (pressure + (square n)*a/(square volume))*(volume - n*b)/
+      (n*gas_constant_atm_liters)
+
+    let%expect_test "van_der_waals_temperature" =
+      van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
+      |> printf "%f";
+      [%expect {| 295.130004 |}]
 end

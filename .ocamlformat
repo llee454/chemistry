@@ -1,6 +1,6 @@
 # "Asemio Style" v1.3
 # Last updated for ocamlformat 0.25.1
-ocaml-version=5.0.0
+ocaml-version=5.1.0
 
 # All available options are listed.
 # An option is commented out when the value matches the default
