@@ -75,6 +75,25 @@ let electron_volts_to_joules = ( * ) electron_volt
 let joules_to_electron_volts x = x / electron_volt
 
 (**
+  Note that j L^-1 = kN m^-2
+*)
+let atmospheres_to_joule_liters atm = 101.325 * atm
+
+(**
+  Accepts the [mass], measured in Kg, and [energy], measured in j, of a
+  moving particle; and returns its velocity in m/s.
+*)
+let get_velocity ~mass ~energy =
+  sqrt (2.0 * energy/mass)
+
+(**
+  Accepts the [mass], measured in Kg, and [velocity], measured in m/s,
+  of a particle and returns the energy of that particle measured in joules.
+*)
+let get_energy ~mass ~velocity =
+  mass * (square velocity)/2.0
+
+(**
   Calculates the potential energy (measured in newtons) between two
   charges [q0] and [q1] that are separated by [r] meters where [q0]
   and [q1] are measured in stoneys.
@@ -554,31 +573,22 @@ module Heat_of_formation = struct
 end
 
 module Gases = struct
-  (** Usually denoted "R" measured in l atm deg^-1 mole^-1 *)
-  let gas_constant_atm_liters = 0.0820
-
   (** Usually denotes "R" measured in j deg^-1 mole^-1 *)
   let gas_constant_joules = 8.3146
+
+  (** Usually denoted "R" measured in l atm deg^-1 mole^-1 *)
+  let gas_constant_atm_liters = gas_constant_joules / atmospheres_to_joule_liters 1.0
+
+  let%expect_test "gas_constant_atm_liters" =
+    printf "%0.04f atm l deg^-1 mole^-1" gas_constant_atm_liters;
+    [%expect {| 0.0821 atm l deg^-1 mole^-1|}]
 
   (** The temperature of the standard atmosphere measured in degrees Kelvin *)
   let standard_temperature = 298.15
 
   (** The Boltzmann constant "k" measured in j deg^-1 *)
-  let boltzmann_constant = 13.805E-24
+  let boltzmann_constant = 1.3805E-23
 
-  (**
-    Accepts the [mass], measured in Kg, and [energy], measured in j, of a
-    moving particle; and returns its velocity in m/s.
-  *)
-  let get_velocity ~mass ~energy =
-    sqrt (2.0 * energy/mass)
-
-  (**
-    Accepts the [mass], measured in Kg, and [velocity], measured in m/s,
-    of a particle and returns the energy of that particle measured in joules.
-  *)
-  let get_energy ~mass ~velocity =
-    mass * (square velocity)/2.0
   (**
     Accepts two arguments: [num_moles] the number of moles of gas molecules;
     and [temperature], measured in degrees Kelvin; and returns the energy
@@ -606,25 +616,20 @@ module Gases = struct
     (pressure * mass)/(gas_constant_atm_liters * temperature)
 
   (**
-    Accepts one argument: [temperature] measured in degrees Kelvin; and
-    returns the mean kinetic energy `(1/2)mv^2` of the molecules within an
-    ideal gas at the given temperature in joules.
+    Accepts one argument [temperature] (K) and returns the most probable
+    kinetic energy (j) of a molecule within an ideal gas having the given
+    temperature.
 
-    Note: according to [1] page 323, "it has been found that the average
-    kinetic energy per molecule, 1/2 mv^2 is the same for all gases at the
-    same temperature."
+    Note: it is a common mistake to believe that this is kT. Many people,
+    including my past self, mistakenly try to calculate this by taking the
+    most probable velocity and calculating the corresponding energy, but this
+    approach is mistaken without accounting for the rescaling between v and E.
   *)
-  let get_mean_energy temperature =
-    3.0 * boltzmann_constant * temperature/2.0
+  let get_most_probable_energy temperature = boltzmann_constant * temperature / 2.0
 
-  let%expect_test "get_mean_energy" =
-    let hydrogen_molecule_mass_kg = 2.0 * 1.00797 / (1_000.0 * mole)
-    and oxygen_molecule_mass_kg = 2.0 * 15.9994 / (1_000.0 * mole) in
-    get_mean_energy standard_temperature |> joules_to_electron_volts |> printf "%f";
-    get_velocity ~mass:hydrogen_molecule_mass_kg ~energy:(celcius_to_kelvin 0.0 |> get_mean_energy) |> printf "%f\n";
-    get_velocity ~mass:hydrogen_molecule_mass_kg ~energy:(celcius_to_kelvin 820.0 |> get_mean_energy) |> printf "%f\n";
-    get_velocity ~mass:oxygen_molecule_mass_kg ~energy:(celcius_to_kelvin 0.0 |> get_mean_energy) |> printf "%f";
-    [%expect {| 1838.414600 |}]
+  let%expect_test "get_most_probable_energy" =
+    get_most_probable_energy 400.0 |> joules_to_electron_volts |> printf "%0.4f eV";
+    [%expect {| 0.0172 eV |}]
 
   (**
     Accepts the [mass], measured in Kg, and [temperature], measured in K,
@@ -641,18 +646,29 @@ module Gases = struct
     [%expect {| 455.7744 |}]
 
   (**
-    Accepts the [mass], measured in Kg, and [temperature], measured in K,
-    of a population of molecules, and returns the most probable energy of
-    molecules within the gase, measured in j.
-  *)
-  let get_most_probable_energy ~mass ~temperature =
-    get_energy ~mass ~velocity:(get_most_probable_velocity ~mass ~temperature)
+    Accepts one argument: [temperature] measured in degrees Kelvin; and
+    returns the mean kinetic energy `(1/2)mv^2` of the molecules within an
+    ideal gas at the given temperature in joules.
 
-  let%expect_test "get_most_probable_energy" =
-    let helium_molecule_mass_kg = 2.0 * 4.0026/(1_000.0 * mole)
-    and temperature = 100.0 in
-    joules_to_electron_volts @@ get_most_probable_energy ~mass:helium_molecule_mass_kg ~temperature |> printf "%0.4f";
-    [%expect {| 455.7744 eV |}]
+    Note: according to [1] page 323, "it has been found that the average
+    kinetic energy per molecule, 1/2 mv^2 is the same for all gases at the
+    same temperature."
+  *)
+  let get_mean_energy temperature =
+    3.0 * (boltzmann_constant * temperature)/2.0
+
+  let%expect_test "get_mean_energy" =
+    let hydrogen_molecule_mass_kg = 2.0 * 1.00797 / (1_000.0 * mole)
+    and oxygen_molecule_mass_kg = 2.0 * 15.9994 / (1_000.0 * mole) in
+    [
+      (hydrogen_molecule_mass_kg, 820.0);
+      (oxygen_molecule_mass_kg, 0.0)
+    ]
+    |> List.map ~f:(fun (mass, temperature) ->
+      get_velocity ~mass ~energy:(celcius_to_kelvin temperature |> get_mean_energy)
+    )
+    |> printf !"%{sexp: float list}";
+    [%expect {| (3677.7545172748069 461.44018789203943) |}]
 
   (**
     Accepts two arguments: [temperature] measured in Kelvins; and [energy]
@@ -673,41 +689,15 @@ module Gases = struct
     let jt = j*temperature in
     (2.0/jt) * sqrt (energy/(pi*jt)) * exp (-energy/jt)
 
-  let%expect_test "joules to electron volts" =
-    let k = 13.805E-24 in
-    joules_to_electron_volts k
-    |> printf "electron volt per degree %f\n";
-    [%expect {||}]
-
-
-  let%expect_test "get_energy_probability" =
-    let n = 100 in
-    for i = 0 to n do
-      let max_energy = 0.01 in
-      let delta = max_energy / float n in
-      let energy = float i * delta in
-      get_energy_probability ~temperature:100.0 ~energy:energy
-      |> printf "[%0.4f, %0.4f],\n" energy
-    done;
-    [%expect {| |}]
-
-  let%expect_test "get_energy_probability" =
-    (Integrate.ocaml_integrate ~f:(fun energy ->
-        get_energy_probability ~temperature:standard_temperature ~energy
-      ) ~lower:0.0 ~upper:3.3228E-22).out
-    |> printf "%f";
-    [%expect {| 0.016443 |}]
-
-  let%expect_test "get_energy_probability" =
-    abs (joules_to_electron_volts (get_mean_energy standard_temperature) - joules_to_electron_volts (Integrate.ocaml_integrate ~f:(fun energy ->
+  let%expect_test "get_energy_probability check mean energy" =
+    (Integrate.qag () ~f:(fun energy ->
         energy * get_energy_probability ~temperature:standard_temperature ~energy
-      ) ~lower:0.0 ~upper:(100.0 * 3.3228E-22)).out)
-    |> printf "%f";
-    [%expect {| 0.000248 |}]
+      ) ~lower:0.0 ~upper:1.00).out
+    |> printf "mean energy reference %f eV calculated %f" (get_mean_energy standard_temperature |> joules_to_electron_volts);
+    [%expect {| mean energy reference 0.038538 eV calculated 0.038538 |}]
 
-  let%expect_test "get_energy_probability" =
-    let temperature = 400.0
-    and helium_molecule_mass_kg = 2.0 * 4.0026/(1_000.0 * mole) in
+  let%expect_test "get_energy_probability check most probable energy" =
+    let temperature = 100.0 in
     let module SA = Simulated_annealing (struct
       type t = float
 
@@ -722,10 +712,8 @@ module Gases = struct
       let print = None
     end)
     in
-    let most_probable_energy = SA.(f ~num_iters:1_000 ~step_size:1E-30 (create_state 1E-30)) |> joules_to_electron_volts
-    and most_probable_energy_ref = get_most_probable_energy ~mass:helium_molecule_mass_kg ~temperature |> joules_to_electron_volts in
-    printf "ref: %f\n" most_probable_energy_ref;
-    printf "calc: %f\n" most_probable_energy;
-    abs (most_probable_energy_ref - most_probable_energy) |> printf "%0.4f";
-    [%expect {||}]
+    let most_probable_energy = SA.(f ~num_iters:1_000 ~step_size:1E-4 (create_state 0.1))
+    and most_probable_energy_ref = get_most_probable_energy temperature |> joules_to_electron_volts in
+    printf "ref: %f calc %f err %f" most_probable_energy_ref most_probable_energy (abs (most_probable_energy_ref - most_probable_energy));
+    [%expect {| ref: 0.004309 calc 0.004309 err 0.000000 |}]
 end
