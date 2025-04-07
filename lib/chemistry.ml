@@ -666,7 +666,6 @@ module Electroneutrality = struct
     *)
     let get x i j = x.(get_index (get_num_atoms x) i j)
 
-
     (**
       Accepts two arguments: [atoms], a list of atom descriptions; and [xs],
       an electron configuration vector; and returns the square of the charge
@@ -936,4 +935,92 @@ module Gases = struct
       van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
       |> printf "%f";
       [%expect {| 295.130004 |}]
+end
+
+module Schrodinger = struct
+  (**
+    This function evaluates the one-dimensional time-independent shrodinger
+    equation (TISE). It accepts five arguments:
+
+    * [mass] (kg) - the mass of the particle 
+    * [potential] - a function that accepts a position [x] and returns the
+      strength of the field (N) at [x].
+    * [energy] (j) - the kinetic energy of the particle
+    * [x] (m) - the location of the particle along the x-axis
+    * [psi] - the wave function, which accepts a position [x] and returns
+      a complex number whose square magnitude represents the probability
+      (density) of the particle being at point [x].
+
+    Note if [psi] is a solution of the equation, this function will return 0.
+
+    Note: in the general TISE, [psi] will return a complex number. However,
+    this function requires [psi] to return only real numbers.
+
+    Note: the TISE is introduced on page 322, equation 9-14, in [1]
+  *)
+  let time_independent ~mass ~potential ~energy ~x ~psi =
+    -(square plancks_constant)/(8.0*mass*(square pi)) * Deriv.nth ~f:psi ~x ~h:angstrom 2 + (potential x - energy)*(psi x)
+
+  let%expect_test "time_independent box" =
+    let n = 10 (* the principal quantum number *)
+    and x = 1.0 * angstrom (* the position at which we will evaluate our wave function *)
+    and width = 2.0 * angstrom
+    and mass = electron_mass_kg
+    in
+    (* a well potential 2 angstroms wide *)
+    let potential x =
+      if x <= 0.0 || width <= x
+      then 1e6
+      else 0.0
+    and get_psi n x = sqrt (2.0/width)*sin (pi*(float n)*x/width)
+    (* uncomment this to verify that this test will fail when given an invalid wave function. *)
+    (* and get_psi _n x = pdf_normal ~mean:(1.0*angstrom) ~std:(0.25*angstrom) x *)
+    and get_wavelength n = 2.0*width/(float n)
+    and get_energy ~mass ~lambda =
+      square (plancks_constant)/(2.0*mass*(square lambda))
+    in
+    let psi = get_psi n
+    and energy = get_energy ~mass ~lambda:(get_wavelength n)
+    in
+    printf "energy: %f eV, soln: %f"
+      (joules_to_electron_volts energy)
+      (1e10 * time_independent ~mass ~potential ~energy ~x ~psi);
+    [%expect {| energy: 940.008768 eV, soln: -0.000000 |}]
+
+  let%expect_test "time_independent spring" =
+    let n = 5 (* the principal quantum number *)
+    and x = 10.0 * angstrom (* the position at which we will evaluate our wave function *)
+    and k = 1e9 * electron_volt (* the spring constant *)
+    and mass = electron_mass_kg
+    in
+    let w = sqrt (k / mass) (* the angular frequency of the oscillation *)
+    and hermite n z =
+      match n with
+      | 0 -> 1.0
+      | 1 -> 2.0*z
+      | 2 -> 4.0*(square z) - 2.0
+      | 3 -> 8.0*(pow_int z 3) - 12.0*z
+      | 4 -> 16.0*(pow_int z 4) - 48.0*(square z) + 12.0
+      | 5 -> 32.0*(pow_int z 5) - 160.0*(pow_int z 3) + 120.0*z
+      | 6 -> 64.0*(pow_int z 6) - 480.0*(pow_int z 4) + 720.0*(square z) - 120.0
+      | _ -> failwiths ~here:[%here] "Error: an error occured while trying to evaluate a hermite polynomial. The requested degree is not unsupported." n [%sexp_of: int]
+    in
+    (* uncomment this to verify that this test will fail when given an invalid wave function. *)
+    (* let get_psi _n x = pdf_normal ~mean:(1.0*angstrom) ~std:(10.0*angstrom) x *)
+    (* the solution for the quantum oscillator *)
+    let get_psi n x =
+      (1.0/sqrt ((pow_int 2.0 n)*(fact n)))
+      *(expt (mass*w/(pi*planck_bar)) (1//4))
+      *(exp (-mass*w*(square x)/(2.0*planck_bar)))
+      *(hermite n (x*sqrt (mass*w/planck_bar)))
+    and get_energy n = planck_bar*w*(float n + 0.5)
+    in
+    let energy = get_energy n
+    and psi = get_psi n
+    and potential x = -k*x
+    in
+    printf "energy: %f eV, soln: %f"
+      (joules_to_electron_volts energy)
+      (1e10 * time_independent ~mass ~potential ~energy ~x ~psi);
+    [%expect {| energy: 0.000048 eV, soln: -0.000000 |}]
 end
