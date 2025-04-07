@@ -959,7 +959,7 @@ module Schrodinger = struct
     Note: the TISE is introduced on page 322, equation 9-14, in [1]
   *)
   let time_independent ~mass ~potential ~energy ~x ~psi =
-    -(square plancks_constant)/(8.0*mass*(square pi)) * Deriv.nth ~f:psi ~x ~h:angstrom 2 + (potential x - energy)*(psi x)
+    -(square plancks_constant)/(8.0*mass*(square pi)) * Deriv.nth ~f:psi ~x ~h:angstrom 2 + (energy - potential x)*(psi x)
 
   let%expect_test "time_independent box" =
     let n = 10 (* the principal quantum number *)
