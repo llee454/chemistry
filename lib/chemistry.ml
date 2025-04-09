@@ -17,7 +17,7 @@ let angstroms_to_meters = ( * ) angstrom
 let meters_to_angstroms x = x / angstrom
 
 (** Planck's constant measured in Joule second *)
-let plancks_constant = 6.6252e-34
+let plancks_constant = 6.62607015e-34
 
 let planck_bar = plancks_constant / (2. * pi)
 
@@ -125,7 +125,7 @@ let%expect_test "photon_energy" =
   |> photon_energy
   |> joules_to_electron_volts
   |> printf "%0.4f eV";
-  [%expect {| 10.1955 eV |}]
+  [%expect {| 10.1968 eV |}]
 
 (**
   Accepts the velocity of an electron and returns its De Broglie
@@ -177,7 +177,7 @@ module Bohr = struct
 
   let%expect_test "bohr_radius" =
     printf "%0.4f %s" (bohr_radius_constant () / angstrom) Symbols.angstrom_char;
-    [%expect {| 0.5292 Å |}]
+    [%expect {| 0.5293 Å |}]
 
   (**
     Accepts two arguments: z, the atomic number of an atom; and n,
@@ -188,7 +188,7 @@ module Bohr = struct
 
   let%expect_test "bohr_radius" =
     bohr_radius ~z:(3.0 - 1.74) 2.0 |> meters_to_angstroms |> printf "%0.4f \u{212B}";
-    [%expect {| 1.6799 Å |}]
+    [%expect {| 1.6804 Å |}]
 
   (**
     Accepts two arguments: [z], the atomic number of an atom;
@@ -200,7 +200,7 @@ module Bohr = struct
 
   let%expect_test "electron_velocity" =
     electron_velocity ~z:1.0 1.0 |> ( * ) 1e-6 |> printf "%0.4fx10^6";
-    [%expect {| 2.1877x10^6 |}]
+    [%expect {| 2.1874x10^6 |}]
 
   (**
     Accepts three arguments: [z], the atomic number of an atom; [n],
@@ -232,14 +232,14 @@ module Bohr = struct
 
   let%expect_test "closest_radius" =
     (closest_radius ~electron_mass:(reduced_electron_mass (19.0 * proton_mass)) ~z:1. ~n:3. 2.) / angstrom |> printf !"%0.4f Å\n";
-    [%expect {| 5.5565 Å |}]
+    [%expect {| 5.5580 Å |}]
 
   (** The energy of an electron in the 1s orbital of a hydrogen atom. *)
   let electron_energy_constant = electron_mass_kg * int_pow electron_charge_s 4 / (2. * square planck_bar)
 
   let%expect_test "electron_energy_constant" =
     printf "%0.4f eV" @@ joules_to_electron_volts electron_energy_constant;
-    [%expect {| 13.6047 eV |}]
+    [%expect {| 13.6011 eV |}]
 
   (**
     Accepts two arguments: z, the atomic number of an atom; and n,
@@ -261,7 +261,7 @@ module Bohr = struct
 
   let%expect_test "electron_velocity" =
     electron_velocity ~z:1 1 |> ( * ) 1e-6 |> printf "%0.4fx10^-6 m/s";
-    [%expect {| 2.1877x10^-6 m/s |}]
+    [%expect {| 2.1874x10^-6 m/s |}]
 
   (**
     Accepts three arguments: [z], the atomic number of an atom;
@@ -276,8 +276,8 @@ module Bohr = struct
     electron_volts_to_joules 24.58 |> shielding_constant ~z:2. ~n:1. |> printf "%0.4f\n";
     electron_volts_to_joules 2_085. |> shielding_constant ~z:13. ~n:1. |> printf "%0.4f";
     [%expect {|
-      0.6559
-      0.6203
+      0.6557
+      0.6187
       |}]
 end
 
@@ -720,7 +720,6 @@ module Electroneutrality = struct
   end
 end
 
-
 module Gases = struct
   (** The Boltzmann constant "k" measured in j deg^-1. *)
   let boltzmann_constant = 1.3805E-23
@@ -935,6 +934,7 @@ module Gases = struct
       van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
       |> printf "%f";
       [%expect {| 295.130004 |}]
+
 end
 
 module Schrodinger = struct
@@ -961,11 +961,53 @@ module Schrodinger = struct
   let time_independent ~mass ~potential ~energy ~x ~psi =
     -(square plancks_constant)/(8.0*mass*(square pi)) * Deriv.nth ~f:psi ~x ~h:angstrom 2 + (energy - potential x)*(psi x)
 
+  
+  module Harmonic_oscillator = struct
+    (**
+      Accepts two arguments:
+      * [k] (N/m) - the spring constant
+      * [mass] (kg) - the "reduced" mass
+      and returns the oscillation frequency of the system.
+
+      Note: the "reduced mass" is the mass of the system relative to the
+      center of mass frame: m0*m1/(m0 + m1).
+    *)
+    let get_freq ~k ~mass = sqrt (k/mass)
+
+    (**
+      Accepts two arguments:
+      * [w] - the oscillation frequency
+      * [n] - the energy level
+      and returns the energy (j) of the system.
+      
+      Note: this equation is often used to calculate the low energy levels
+      of diatomic molecules.
+    *)
+    let get_energy ~w ~n = planck_bar*w*(float n + 0.5)
+
+    (**
+      Accepts two arguments: [energy_diff] (J), the energy difference between
+      the first and second energy levels; and [mass], the "reduced" mass of
+      the system; and returns the spring constant (n/m) for the system.
+    *)
+    let get_spring_constant ~energy_diff ~mass = mass*square (energy_diff/planck_bar)
+
+    let%expect_test "get_spring_constant" =
+      (* the reduced mass of a H and Cl atom in a HCL molecule *)
+      let mass = (1.01*35.0/(1.01 + 35.0)*1.661e-27) in
+      (* computes the implied spring constant for a HCL molecule that absorbes a photon at the 3,350nm wavelength. *)
+      get_spring_constant ~energy_diff:(light_wavelength_to_frequncy 3_350e-9 |> photon_energy) ~mass
+      |> printf "%f";
+      [%expect {| 515.522302 |}]
+  end
+
   let%expect_test "time_independent box" =
     let n = 10 (* the principal quantum number *)
     and x = 1.0 * angstrom (* the position at which we will evaluate our wave function *)
     and width = 2.0 * angstrom
-    and mass = electron_mass_kg
+    and mass =
+      (* the "reduced mass" (kg) (relative to center of mass) of a H and a Cl atom in an HCl molecule *)
+      (1.01*35.0)/(1.01 + 35.0) * 1.661e-27
     in
     (* a well potential 2 angstroms wide *)
     let potential x =
@@ -985,7 +1027,7 @@ module Schrodinger = struct
     printf "energy: %f eV, soln: %f"
       (joules_to_electron_volts energy)
       (1e10 * time_independent ~mass ~potential ~energy ~x ~psi);
-    [%expect {| energy: 940.008768 eV, soln: -0.000000 |}]
+    [%expect {| energy: 0.525227 eV, soln: 0.000000 |}]
 
   let%expect_test "time_independent spring" =
     let n = 5 (* the principal quantum number *)
@@ -1022,5 +1064,20 @@ module Schrodinger = struct
     printf "energy: %f eV, soln: %f"
       (joules_to_electron_volts energy)
       (1e10 * time_independent ~mass ~potential ~energy ~x ~psi);
-    [%expect {| energy: 0.000048 eV, soln: -0.000000 |}]
+    [%expect {| energy: 0.000048 eV, soln: 0.000000 |}]
 end
+
+let%expect_test "temp" =
+  let molar_mass_carbon = 12.01115
+  and molar_mass_oxygen = 15.9994
+  and van_der_waals_co2_a = 3.59
+  and van_der_waals_co2_b = 0.0427
+  in
+  let molar_mass_co2 = molar_mass_carbon + 2.0*molar_mass_oxygen
+  and mass = 1.56
+  in
+  let moles = mass/molar_mass_co2 in
+  Gases.van_der_waals_volume ~a:van_der_waals_co2_a ~b:van_der_waals_co2_b ~n:moles ~pressure:1.0 ~temperature:(celcius_to_kelvin 25.0)
+  |> printf "volume: %f l";
+  [%expect {| volume: 0.863529 l |}]
+      
