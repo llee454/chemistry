@@ -579,13 +579,16 @@ end
   Given a set of n atoms that comprise a molecule [a_0, a_1, ..., a_{n-1}],
   we can:
   1. assign unshared electrons to individual atoms
-  2. place zero or more covalent bonds (shared pairs of electrons) between two atoms.
+  2. place zero or more covalent bonds (shared pairs of electrons) between
+    two atoms.
 
   Every atom is described by two properties:
-  1. the number of valence electrons (the number of electrons in its outermost/"valence" shell)
+  1. the number of valence electrons (the number of electrons in its
+    outermost/"valence" shell)
   2. its electronegativity
 
-  We use a symmetric matrix to count the number of shared electrons between each pair of atoms.
+  We use a symmetric matrix to count the number of shared electrons between
+  each pair of atoms.
 
   [
     [y_{0,0}, y_{0,1}, ..., y_{0,n-1}],
@@ -594,21 +597,29 @@ end
     [y_{n-1,0}, y_{n-1,1}, ..., y_{n-1,n-1}],
   ]
 
-  The matrix is symmetric so the y_{i,j} = y_{j,i} for all i and j. Also, we assume that all diagonal elements y_{i,i} represent the number of unshared electrons that we assign to the ith atom.
+  The matrix is symmetric so the y_{i,j} = y_{j,i} for all i and j. Also,
+  we assume that all diagonal elements y_{i,i} represent the number of
+  unshared electrons that we assign to the ith atom.
 
-  Because the matrix is symmetric, we only consider the top right triangular entries. These can be listed in a single vector as:
+  Because the matrix is symmetric, we only consider the top right triangular
+  entries. These can be listed in a single vector as:
 
   [y_{0,0}, y_{0,1}, ..., y_{0,n-1}, y_{1,1}, ... y{1,n-1}, ..., y{n-1,n-1}]
 
   We call this vector the "electron configuration vector".
 
-  Given an "electron configuration vector," we can compute the charge on each atom. For each atom a_i, we calculate m_i, the number of unshared electrons and covalent bonds involving a_i and then compute:
+  Given an "electron configuration vector," we can compute the charge on
+  each atom. For each atom a_i, we calculate m_i, the number of unshared
+  electrons and covalent bonds involving a_i and then compute:
 
-    sum (ionic (a_i.electronegativity - a_j.electronegativity), j, n-1) - (m - a_i.num_valence_electrons)
+    sum (ionic (a_i.electronegativity - a_j.electronegativity), j, n-1)
+      - (m - a_i.num_valence_electrons)
 
-  where ionic (x, y) returns the degree to which an electron will favor an electron with electronegativity x over y. 
+  where ionic (x, y) returns the degree to which an electron will favor an
+  electron with electronegativity x over y.
 
-  We use a genetic algorithm to find an electron configuration that minimizes the charge across atoms.
+  You can then use a variety of algorithms to find the electron configuration
+  that minimizes the charge imbalance across atoms.
 *)
 module Electroneutrality = struct
   module Atom = struct
@@ -667,12 +678,13 @@ module Electroneutrality = struct
     let get x i j = x.(get_index (get_num_atoms x) i j)
 
     (**
-      Accepts two arguments: [atoms], a list of atom descriptions; and [xs],
-      an electron configuration vector; and returns the square of the charge
-      of the atoms in the described molecular configuration.
+      Accepts two arguments: [atoms], a list of atom descriptions; and [config],
+      an electron configuration vector; and returns an array [xs] where
+      [xi.(i)] gives the charge on the i-th atom in [atoms] given the electron
+      configuration [config].
     *)    
     let get_charge (atoms : Atom.t array) (config : int array) =
-      Array.foldi atoms ~init:0.0 ~f:(fun i total_square_charge ai ->
+      Array.mapi atoms ~f:(fun i ai ->
         let (ai_charge, ai_num_electrons) = Array.foldi atoms ~init:(0.0, get config i i)
           ~f:(fun j ((ai_charge, ai_num_electrons) as acc) aj ->
             if [%equal: int] i j
@@ -690,8 +702,16 @@ module Electroneutrality = struct
         )
         in
         (* printf "charge on %d: %f\n" i @@ ai_charge + float Int.(ai.num_valence_electrons - ai_num_electrons); *)
-        total_square_charge + square (ai_charge + float Int.(ai.num_valence_electrons - ai_num_electrons))
+        ai_charge + float Int.(ai.num_valence_electrons - ai_num_electrons)
       )
+
+    (**
+      Accepts two arguments: [atoms], a list of atom descriptions; and [config],
+      an electron configuration vector; and returns the square of the charge
+      of the atoms in the described molecular configuration.
+    *)    
+    let get_charge_square_sum atoms config =
+      get_charge atoms config |> sum ~f:square
     
     let%expect_test "get_charge" =
       let atoms = [|
@@ -713,11 +733,87 @@ module Electroneutrality = struct
       |]
       in
       [|
-        get_charge atoms config0;
-        get_charge atoms config1;
+        get_charge_square_sum atoms config0;
+        get_charge_square_sum atoms config1;
       |] |> printf !"%{sexp: float array}";
       [%expect {| (1.0695658090848179 0.060284980182740575) |}]
   end
+end
+
+module Bond_length = struct
+  let bond_lengths =
+  [
+    "C", 0.77;
+    "N", 0.70;
+    "O", 0.66;
+    "F", 0.64;
+    "Si", 1.17;
+    "P", 1.10;
+    "S", 1.04;
+    "Cl", 0.99;
+    "Ge", 1.22;
+    "As", 1.21;
+    "Se", 1.17;
+    "Br", 1.14;
+    "Sn", 1.40;
+    "Sb", 1.41;
+    "Te", 1.37;
+    "I", 1.33
+  ]
+  |> List.map ~f:(Tuple2.map_snd ~f:(( * ) 2.0))
+  |> String.Map.of_alist_exn
+
+  (**
+    Accepts one argument [degree] which represents the degree to which a bond
+    is a single, double, triple, etc covalent bond and returns the approximate
+    amount to which the bond's length is shortened measured in angstroms.
+    
+    Note: according to [1] page 196, most bonds shorten by approximately
+    the same amount when doubled and tripled. Note that many molecules have
+    "resonant" structures - i.e. electrons flick between bonds leading them
+    to be "partially" double, triple, etc. For example, a bond that is 50%
+    double and 50% triple because of resonance will have a degree equal to 1.5.
+  *)
+  let get_shortening degree =
+    if [%equal: float] degree 1.0
+    then 0.0
+    else Float.(0.308779748 * log degree - 0.001086346)
+
+  let%expect_test "get_shortening" =
+    [ 1.0; 2.0; 3.0 ] |> List.iter ~f:(fun degree -> printf "%0.4f %s " (get_shortening degree) Symbols.angstrom_char);
+    [%expect {| 0.0000 Å 0.2129 Å 0.3381 Å |}]
+
+
+  (**
+    Accepts two arguments, [x] and [y], where [x] represents the length of
+    a single covalent bond formed between two atoms of some element A and
+    [y] represents the length of a single covalent bond between two atoms of
+    some element B; and returns an estimate of the length in angstroms of a
+    single covalent bond between an atom of element A and an atom of element B.
+
+    Note: that this function returns values that are typically accurate to
+    within 0.03 angstroms.
+
+    Note: according to [1] page 196, most bonds shorten by approximately
+    the same amount when doubled and tripled. Note that many molecules have
+    "resonant" structures - i.e. electrons flick between bonds leading them
+    to be "partially" double, triple, etc.
+  *)
+  let get_bond_length ?(degree = 1.0) x y =
+    mean [| x; y |] - get_shortening degree
+
+  let get_bond_length_simple ?degree x y =
+    get_bond_length ?degree (Core.Map.find_exn bond_lengths x) (Core.Map.find_exn bond_lengths y)
+
+  let%expect_test "get_bond_length_simple" =
+    printf "%0.2f %s\n" (get_bond_length_simple "C" "Cl") Symbols.angstrom_char;
+    printf "%0.2f %s\n" (get_bond_length_simple ~degree:3.0 "C" "N") Symbols.angstrom_char;
+    printf "%0.2f %s" (get_bond_length_simple ~degree:1.5 "N" "O") Symbols.angstrom_char;
+    [%expect {|
+      1.76 Å
+      1.13 Å
+      1.24 Å
+      |}]
 end
 
 module Gases = struct
@@ -1030,10 +1126,15 @@ module Schrodinger = struct
     [%expect {| energy: 0.525227 eV, soln: 0.000000 |}]
 
   let%expect_test "time_independent spring" =
-    let n = 5 (* the principal quantum number *)
-    and x = 10.0 * angstrom (* the position at which we will evaluate our wave function *)
-    and k = 1e9 * electron_volt (* the spring constant *)
-    and mass = electron_mass_kg
+    let n = 0 (* the principal quantum number *)
+    and x = 1.0 * angstrom (* the position at which we will evaluate our wave function *)
+    (* the reduced mass of the system *)
+    and mass =
+      (* the "reduced mass" (kg) (relative to center of mass) of a H and a Cl atom in an HCl molecule *)
+      (1.01*35.0)/(1.01 + 35.0) * 1.661e-27
+    in
+    (* the spring constant *)
+    let k = Harmonic_oscillator.get_spring_constant ~mass ~energy_diff:(light_wavelength_to_frequncy 3.350e-6 |> photon_energy)
     in
     let w = sqrt (k / mass) (* the angular frequency of the oscillation *)
     and hermite n z =
@@ -1064,7 +1165,7 @@ module Schrodinger = struct
     printf "energy: %f eV, soln: %f"
       (joules_to_electron_volts energy)
       (1e10 * time_independent ~mass ~potential ~energy ~x ~psi);
-    [%expect {| energy: 0.000048 eV, soln: 0.000000 |}]
+    [%expect {| energy: 0.185065 eV, soln: 0.000000 |}]
 end
 
 let%expect_test "temp" =
