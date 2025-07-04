@@ -629,6 +629,15 @@ module Electroneutrality = struct
     } [@@deriving sexp]
   end
 
+  (**
+    Note: an electron configuration matrix gives the number of electrons
+    shared between atoms. The i,j entry tells us how many **pairs** of
+    electrons are shared between atoms i and j. Thus, if i,j = 1 we know
+    that atoms i and j share a covalent bond. For diagonal elements i,i
+    the calculation is a little different. These entries tell us how many
+    valence electrons remain unshared by the i-th atom. Notice that each
+    increment correponds to a **single** electron.
+  *)
   module Electron_configuration_vector = struct
     (**
       Accepts an electron configuration vector and returns the number of atoms represented.
@@ -641,17 +650,25 @@ module Electroneutrality = struct
       Float.iround_nearest_exn @@ (sqrt (8.0*float n + 1.0) - 1.0)/2.0
 
     (**
+      Accepts [num_atoms] and returns the number of entries that are in the
+      electron configuration vector associated with the electron configuration
+      matrix.
+    *)
+    let get_num_entries num_atoms =
+      Int.(num_atoms*(num_atoms + 1)/2)
+
+    (**
       Accepts three arguments: [n], the number of atoms in an electron
       configuration matrix; [i], a row index; [j], a column index; and returns
       the index of the corresponding element within the associated electron
       configuration vector.
     *)
-    let get_index n i j =
+    let get_index num_atoms i j =
       let open Int in
       let k = min i j
       and l = max i j
       in
-      k*n - (k*(k + 1))/2 + l
+      k*num_atoms - (k*(k + 1))/2 + l
 
     (*
       [| 0.0; 1.0; 2.0;
@@ -670,6 +687,68 @@ module Electroneutrality = struct
       ]
       |> printf !"%{sexp: int list}";
       [%expect {| (0 3 5 4 2 1 4) |}]
+
+    (**
+      Accepts two arguments: [num] the number of atoms in the electron
+      configuration vector; and [index], an offset into the vector; and
+      returns the corresponding row within the configuration matrix.
+    *)
+    let get_row num index =
+      let n = float num
+      and i = float index
+      in
+      (1.0 + 2.0*n - sqrt(4.0*square n + 4.0*n - 8.0*i + 1.0))/2.0
+      |> Float.iround_down_exn
+
+    let%expect_test "get_row" =
+      [
+        get_row 5 0;
+        get_row 5 4;
+        get_row 5 5;
+        get_row 5 6;
+        get_row 5 9;
+        get_row 5 8;
+        get_row 5 14;
+      ]
+      |> printf !"%{sexp: int list}";
+      [%expect {| (0 0 1 1 2 1 4) |}]
+
+    let get_row_start num row = 
+      let i = float row in
+      Float.to_int @@ (float num)*i + (i - square i)/2.0
+
+    let%expect_test "get_row" =
+      [
+        get_row_start 5 0;
+        get_row_start 5 1;
+        get_row_start 5 2;
+        get_row_start 5 3;
+        get_row_start 5 4;
+      ]
+      |> printf !"%{sexp: int list}";
+      [%expect {| (0 5 9 12 14) |}]
+
+    (**
+      Accepts two arguments [num], the number of atoms; and [index], an index
+      into a electron configuration vector; and returns the corresponding
+      row and column in the associated configuration matrix.
+    *)
+    let get_row_column num_atoms index =
+      let open Int in
+      let row = get_row num_atoms index in
+      (row, index - get_row_start num_atoms row + row)
+
+    let%expect_test "get_row" =
+      [
+        get_row_column 5 0;
+        get_row_column 5 7;
+        get_row_column 5 9;
+        get_row_column 5 12;
+        get_row_column 5 13;
+        get_row_column 5 14;
+      ]
+      |> printf !"%{sexp: (int * int) list}";
+      [%expect {| ((0 0) (1 3) (2 2) (3 3) (3 4) (4 4)) |}]
 
     (**
       Accepts an electron configuration vector and returns the corresponding
@@ -737,6 +816,391 @@ module Electroneutrality = struct
         get_charge_square_sum atoms config1;
       |] |> printf !"%{sexp: float array}";
       [%expect {| (1.0695658090848179 0.060284980182740575) |}]
+  end
+
+  (**
+    This module uses a genetic algorithm to find the electron configuration
+    that maximizes electroneutrality.
+  *)
+  module Genetic = struct
+    open Int
+
+    (**
+      Accepts two arguments: [len], the number of elements; and [sum]; and
+      returns a random vector that has [len] elements that sum to [sum].
+      
+      Note: this function assigns a uniform probability across all elements.
+    *)
+    let random_vector ~len sum =
+      let xs = Array.create ~len 0 in
+      for _ = 0 to sum - 1 do
+        let i = Random.int len in
+        xs.(i) <- xs.(i) + 1
+      done;
+      xs
+
+    let%expect_test "random_vector_balanced" =
+      printf !"%{sexp: int array}" (random_vector ~len:5 15);
+      [%expect {| (4 3 2 2 4) |}] 
+
+    (**
+      Fillable vector.
+
+      We have a vector where we will repeatedly select a random slot and,
+      if the slot is not "filled," we will add an additional new element to
+      the slot. We want to do this efficiently, i.e. we want avoid randomly
+      selecting slots that are already "filled" and we want to ensure that
+      the process gives as uniform a probability distribution over all slots
+      as possible.
+
+      We create a binary tree over all of the slots. The leaves represent
+      slots and report two values, the number of elements inserted and the
+      number of elements that can be inserted before the slot is "filled." The
+      nodes report the number of slots leaves/slots below them that are
+      available/not filled.
+
+      Each iteration, we look at the root node and choose a number less than or
+      equal to the number of available slots. We then walk through the tree to
+      find the nth slot, insert our element, and recursively update the nodes.
+    *)
+    module Tree = struct
+      type 'a t =
+      | Node of {
+        num: int; (** the number of leaves in this tree *)
+        mutable num_available: int; (** the number of unfilled leaves in this tree *)
+        left: 'a t;
+        right_opt: 'a t option }
+      | Leaf of { mutable value: 'a; mutable full: bool }
+      [@@deriving sexp]
+    end
+
+    (**
+      Accepts a fillable tree and returns a sequence of the leaf values in
+      left-most order.
+    *)
+    let rec get_leaves : 'a Tree.t -> 'a Sequence.t = function
+    | Tree.Leaf info -> Sequence.singleton info.value
+    | Tree.Node info ->
+      Sequence.append
+        (get_leaves info.left)
+        (Option.value_map info.right_opt ~default:Sequence.empty ~f:(fun right ->
+          get_leaves right
+        ))
+
+    (** Returns the number of leaves in the given tree. *)
+    let get_num = function
+    | Tree.Node info -> info.num
+    | Tree.Leaf _ -> 1
+
+     (**
+       Accepts a tree and returns the number of leafs that are not full
+       within it.
+     *)
+     let get_num_available = function
+     | Tree.Node info -> info.num_available
+     | Tree.Leaf info -> if info.full then 0 else 1
+
+    (**
+      Accepts two arguments: [f], a function that accepts a slot index and
+      returns the slot's data; and [num]; and creates a fillable vector tree.
+    *)
+    let rec create ~f num =
+      if num = 0
+      then None
+      else Some (create_aux ~f 0 num)
+
+    and create_aux ~f start num =
+      let depth = float num |> log2 |> Float.iround_up_exn in
+      if depth = 0
+      then Tree.Leaf { value = f start; full = false }
+      else begin
+        let num_right = num / 2 in
+        let num_left  = num - num_right in
+        let left = create_aux ~f start num_left
+        and right_opt =
+          if num_right = 0
+          then None
+          else Some (create_aux ~f (start + num_left) num_right)
+        in
+        Tree.Node { num; num_available = num; left; right_opt }
+      end
+
+    let%expect_test "create" =
+      create 5 ~f:(fun i -> i) |> printf !"%{sexp: int Tree.t option}"; 
+      [%expect {|
+        ((Node (num 5) (num_available 5)
+          (left
+           (Node (num 3) (num_available 3)
+            (left
+             (Node (num 2) (num_available 2) (left (Leaf (value 0) (full false)))
+              (right_opt ((Leaf (value 1) (full false))))))
+            (right_opt ((Leaf (value 2) (full false))))))
+          (right_opt
+           ((Node (num 2) (num_available 2) (left (Leaf (value 3) (full false)))
+             (right_opt ((Leaf (value 4) (full false)))))))))
+        |}]
+
+    module Tree_update_op = struct
+      (**
+        Indicates whether or not a tree update filled a slot, unfilled a
+        slot, or had no impact on the number of filled slots.
+      *)
+      type t = Filled | Unfilled | Noop
+      [@@deriving sexp]
+    end
+
+    (** 
+      Accepts four arguments: [f], a function that accepts a slot value, and
+      returns a new slot value; [is_full], another function that accepts a
+      slot value and returns true iff the slot is "full"; [i], a slot index;
+      and [tree], a fillable vector tree; and updates the i-th slot's value
+      using [f].
+
+      If, after the update, the slot is full according to [is_full], this
+      function marks the slot as full and updates the ancestor nodes
+      accordingly.
+
+      If the [unfilled_only] flag is set to true, the index [i] refers to the
+      "i-th unfilled slot." Exercise care, when using this flag as the i-th
+      unfilled slot may change as slots are filled and unfilled.
+    *)
+    let rec update ?(unfilled_only = false) ~f ~is_full i tree =
+      let _ = update_aux ~unfilled_only ~f ~is_full i tree in ()
+
+    and update_aux ?(unfilled_only = false) ~f ~is_full i = function
+      | Tree.Leaf info ->
+        if i = 0
+        then begin
+          info.value <- f info.value;
+          let full = is_full info.value in
+          let res = match info.full, full with
+          | true, false -> Tree_update_op.Unfilled
+          | false, true -> Tree_update_op.Filled
+          | _ -> Tree_update_op.Noop
+          in
+          info.full  <- full;
+          res
+        end else failwiths ~here:[%here] "Error: an error occured while trying to update a fillable vector tree. Invalid index." i [%sexp_of: int]
+      | Tree.Node info ->
+        let num_left = if unfilled_only
+          then get_num_available info.left
+          else get_num info.left
+        in
+        let filled_slot = if i < num_left
+          then update_aux ~unfilled_only ~f ~is_full i info.left
+          else begin
+            match info.right_opt with 
+            | None -> failwiths ~here:[%here] "Error: an error occured while trying to update a fillable vector tree. Invalid index." i [%sexp_of: int]
+            | Some right -> update_aux ~unfilled_only ~f ~is_full (i - num_left) right
+          end
+        in
+        let () = match filled_slot with
+          | Tree_update_op.Filled -> info.num_available <- info.num_available - 1
+          | Tree_update_op.Unfilled -> info.num_available <- info.num_available + 1
+          | _ -> ()
+        in
+        filled_slot
+
+    let%expect_test "create" =
+      let tree = create 5 ~f:(fun i -> i) |> Option.value_exn in
+      update 0 tree ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      update 4 tree ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      update 1 tree ~unfilled_only:true ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      printf !"%{sexp: int Tree.t}" tree;
+      [%expect {|
+        (Node (num 5) (num_available 2)
+         (left
+          (Node (num 3) (num_available 1)
+           (left
+            (Node (num 2) (num_available 1) (left (Leaf (value 0) (full true)))
+             (right_opt ((Leaf (value 1) (full false))))))
+           (right_opt ((Leaf (value 4) (full true))))))
+         (right_opt
+          ((Node (num 2) (num_available 1) (left (Leaf (value 3) (full false)))
+            (right_opt ((Leaf (value 8) (full true))))))))
+        |}]
+
+    module Electron_configuration_vector_tree = struct
+      (**
+        Represents the information stored within the leaves of an electron
+        configuration vector tree.
+      *)
+      type t = {
+        index: int;
+        num_electrons: int
+      }
+      [@@deriving sexp]
+    end
+
+    (**
+      Accepts an array of atom descriptions and an electron configuration
+      vector tree that describes a distribution of electrons between those
+      atoms and returns the square sum of the charge distribution of that
+      electron distribution.
+    *)
+    let get_charge_square_sum atoms tree =
+      get_leaves tree
+      |> Sequence.map ~f:(fun (info : Electron_configuration_vector_tree.t) -> info.num_electrons)
+      |> Sequence.to_array
+      |> Electron_configuration_vector.get_charge_square_sum atoms
+
+    (**
+      Accepts one argument [num_atoms] and returns an empty electron
+      configuration vector tree with slots for [num_atoms] atoms - i.e. to
+      describe the number of electrons shared between [num_atoms].
+    *)
+    let create_electron_configuration_vector_tree num_atoms =
+      Electron_configuration_vector.get_num_entries num_atoms
+      |> create ~f:(fun index -> Electron_configuration_vector_tree.{index; num_electrons = 0 })
+
+    (**
+      Accepts three arguments: [num_atoms], an integer that specifies how many
+      atoms are associated with the given electron configuration vector tree;
+      [atom_index], the index of the atom whose tree entries will be marked as
+      full; and [tree], an electron configuration vector tree; and marks the
+      entries in [tree] that are associated with the referenced atom as full.
+    *)
+    let mark_atom_as_full ~num_atoms atom_index tree =
+      for r = 0 to atom_index do
+        update (Electron_configuration_vector.get_index num_atoms r atom_index) tree
+          ~f:(Fn.id) ~is_full:(Fn.const true)
+      done;
+      for c = atom_index + 1 to num_atoms - 1 do
+        update (Electron_configuration_vector.get_index num_atoms atom_index c) tree
+          ~f:(Fn.id) ~is_full:(Fn.const true)
+      done
+
+    (**
+      Accepts three arguments: [atoms_num_valence_electrons], an array that
+      lists the number of valence electrons available for each atom; [i];
+      and [tree], an electron configuration vector tree; adds an electron
+      to the i-th available/unfilled slot within [tree] and decrements the
+      number of available valence electrons in [atoms_num_valence_electrons].
+    *)
+    let add_electron atoms_num_valence_electrons i tree =
+      if get_num_available tree <= i then failwiths ~here:[%here] "Error: an error occured while trying to add an electron to an electron configuration vector tree. The given index is invalid. The tree does not have enough unfilled slots." (i, tree) [%sexp_of: int * Electron_configuration_vector_tree.t Tree.t];
+      let num_atoms = Array.length atoms_num_valence_electrons in
+      update i tree ~unfilled_only:true ~f:(fun (info : Electron_configuration_vector_tree.t) ->
+          { info with num_electrons = info.num_electrons + 1 }
+        )
+        ~is_full:(fun (info : Electron_configuration_vector_tree.t) ->
+          let row, col = Electron_configuration_vector.get_row_column num_atoms info.index in
+          atoms_num_valence_electrons.(row) <- atoms_num_valence_electrons.(row) - 1;
+          (*
+            Note: off-diagonal entries within the electron configuration
+            matrix correspond to shared pairs of electrons - i.e. to covalent
+            bonds. Diagonal entries correspond to unshared valence 
+          *)
+          if not (row = col) then atoms_num_valence_electrons.(col) <- atoms_num_valence_electrons.(col) - 1;
+          let atom0_is_filled = atoms_num_valence_electrons.(row) = 0
+          and atom1_is_filled = atoms_num_valence_electrons.(col) = 0
+          in
+          if atom0_is_filled then mark_atom_as_full ~num_atoms row tree;
+          if atom1_is_filled && not (row = col) then mark_atom_as_full ~num_atoms col tree;
+          atom0_is_filled || atom1_is_filled
+        )
+
+    (**
+      Accepts an array of atom descriptions and returns a randomly generated
+      electron assignment along with its charge distribution's square sum.
+
+      Note: this function selects electron distributions randomly where each
+      distribution has an equal chance of being chosen.
+    *)
+    let create_random_electron_assignment atoms =
+      let num_valence_electrons = Array.map atoms ~f:(fun (atom : Atom.t) -> atom.num_valence_electrons) in
+      let num_atoms = Array.length num_valence_electrons in
+      let tree = create_electron_configuration_vector_tree num_atoms |> Option.value_exn in
+      let electron_assignment = Queue.create () in
+      while Array.sum (module Int) num_valence_electrons ~f:(Fn.id) > 0 do
+        let i = Random.int (get_num_available tree) in
+        Queue.enqueue electron_assignment i;
+        add_electron num_valence_electrons i tree
+      done;
+      (Queue.to_array electron_assignment, get_charge_square_sum atoms tree)
+
+    let%expect_test "create_random_electron_assignment" =
+      let atoms = [|
+        Atom.{ num_valence_electrons = 2; electronegativity = 1.5 }; (* Be *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 4; electronegativity = 2.5 } (* C *)
+      |]
+      in
+      let (assignment, charge) = create_random_electron_assignment atoms in
+      printf !"%{sexp: int array * float}" (assignment, charge);
+      [%expect {| ((9 4 1 0 0 0 0) 0.017390946570718588) |}]
+
+    (**
+      Accepts four arguments: [mutation_rate], [atoms], [assignment0]
+      and [assignment1]; generates an electron assignment by randomly
+      selecting electron assignments from assignment0 and assigment1 where
+      [mutation_rate] determines the probability that the function will
+      insert a random electron assignment. It then returns the generated
+      assignment along with the assignment's charge distribution's square sum.
+      
+      If at some point, this function does not have an assignment available
+      from one of the two given it will randomly assign the electron.
+    *)
+    let randomly_merge_electron_assignments mutation_rate atoms assignment0 assignment1 =
+      let assignment0_len = Array.length assignment0
+      and assignment1_len = Array.length assignment1
+      in
+      let num_valence_electrons = Array.map atoms ~f:(fun (atom : Atom.t) -> atom.num_valence_electrons) in
+      let num_atoms = Array.length num_valence_electrons in
+      let tree = create_electron_configuration_vector_tree num_atoms |> Option.value_exn in
+      let electron_assignment = Queue.create ()
+      and index = ref (-1)
+      in
+      while Array.sum (module Int) num_valence_electrons ~f:(Fn.id) > 0 do
+        index := succ !index;
+        let num_available = get_num_available tree in
+        (* splice or mutate randomly *)
+        let i =
+          if Float.(Random.float 1.0 <= mutation_rate)
+          then Random.int num_available
+          else 
+            match Random.bool () with
+            | true  when !index < assignment0_len -> assignment0.(!index)
+            | false when !index < assignment1_len -> assignment1.(!index)
+            | _ -> Random.int num_available
+        in
+        Queue.enqueue electron_assignment i;
+        add_electron num_valence_electrons i tree
+      done;
+      (Queue.to_array electron_assignment, get_charge_square_sum atoms tree)
+
+    let%expect_test "randomly_merge_electron_assignments" =
+      let atoms = [|
+        Atom.{ num_valence_electrons = 2; electronegativity = 1.5 }; (* Be *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 4; electronegativity = 2.5 } (* C *)
+      |]
+      in
+      let (assignment0, charge0) = create_random_electron_assignment atoms
+      and (assignment1, charge1) = create_random_electron_assignment atoms in
+      let (assignment, charge) = randomly_merge_electron_assignments 0.1 atoms assignment0 assignment1 in
+      [
+        (assignment0, charge0);
+        (assignment1, charge1);
+        (assignment, charge)
+      ]
+      |> printf !"%{sexp: (int array * float) list}";
+      [%expect {||}]
+      
+          
+
+    (**
+      Accepts a list [atoms] where each element is an integer specifying
+      how many valence electrons the ith element has; and returns a random
+      electron configuration vector.
+    *)
+    (* let create_random_electron_config atoms =
+      let atoms_len = Array.length atoms in
+      let len = Int.(atoms_len * (atoms_len + 1)/2) in
+      let xs = Array.create ~len 0 in *)
+      
   end
 end
 
