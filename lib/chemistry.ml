@@ -79,6 +79,10 @@ let joules_to_electron_volts x = x / electron_volt
 *)
 let atmospheres_to_joule_liters atm = 101.325 * atm
 
+let atmospheres_to_bars atm = 1.01325 * atm
+
+let bars_to_atmosphers bar = bar/1.01325
+
 (**
   Accepts the [mass], measured in Kg, and [energy], measured in j, of a
   moving particle; and returns its velocity in m/s.
@@ -127,12 +131,6 @@ let%expect_test "photon_energy" =
   |> printf "%0.4f eV";
   [%expect {| 10.1968 eV |}]
 
-(**
-  Accepts the velocity of an electron and returns its De Broglie
-  wavelength.
-*)
-let de_broglie_wavelength velocity = plancks_constant / (electron_mass_kg * velocity)
-
 let%expect_test "energy_of_photon" =
   let v = 650e-9 in
   light_wavelength_to_frequncy v |> photon_energy |> ( * ) 1e19 |> printf "%0.2fx10^19 J";
@@ -145,6 +143,15 @@ let%expect_test "orbit_transition" =
   |> ( * ) 1e18
   |> printf "%0.2fx10^18 J";
   [%expect {| 1.63x10^18 J |}]
+
+let de_broglie_wavelength ~mass velocity =
+  plancks_constant / (mass * velocity)
+
+(**
+  Accepts the velocity of an electron and returns its De Broglie
+  wavelength.
+*)
+let electron_de_broglie_wavelength velocity = plancks_constant / (electron_mass_kg * velocity)
 
 (**
   Equations from the Bohr model.
@@ -505,7 +512,7 @@ module Heat_of_formation = struct
     A molecule; and [x1], the electronegativity of a B molecule.
   
     Note: this function returns an empirical approximation that is
-    generally accurate to within 3 kJ mole^-1.
+    (* generally accurate to within 3 kJ mole^-1. *)
 
     WARNING: when breaking bonds, generally, the amount of energy
     needed will differ. For example: to break the H-O bond in
@@ -939,26 +946,36 @@ module Gases = struct
     measured in electron volts; and returns the probability density that
     a randomly selected molecule from an ideal gas will have the given
     energy.
+
+    WARNING: this function relies on the Boltzman distribution which assumes
+    that the number of quantum states available to the molecules in the
+    gas is significantly greater than the number of molecules. That is,
+    this equation breaks down when the gas temperature approaches zero K.
+
+    Note: this function works with extremely small numbers which led to
+    numerical instability. To improve numerical stability, we switch from
+    joules to electron volts.
+
+    Note: this function is equivalent to:
+
+    [
+      let k = boltzmann_constant in
+      let j = joules_to_electron_volts k in
+      let jt = j*temperature in
+      (2.0/jt) * sqrt (energy/(pi*jt)) * exp (-energy/jt)
+    ]
+
+    See: Wikipedia: Maxwell-Boltzmann distribution
   *)
   let get_energy_probability ~temperature ~energy =
-    let k = 13.805E-24 in
-    (*
-      boltzmann's constant expressed as electron volts per degree.
-
-      Note: this function works with extremely small numbers which led to
-      numerical instability. To improve numerical stability, we switch from
-      joules to electron volts.
-    *)
-    let j = joules_to_electron_volts k in
-    let jt = j*temperature in
-    (2.0/jt) * sqrt (energy/(pi*jt)) * exp (-energy/jt)
+    pdf_gamma ~a:(3//2) ~b:((joules_to_electron_volts boltzmann_constant)*temperature) energy
 
   let%expect_test "get_energy_probability check mean energy" =
     (Integrate.qag () ~f:(fun energy ->
         energy * get_energy_probability ~temperature:standard_temperature ~energy
       ) ~lower:0.0 ~upper:1.00).out
-    |> printf "mean energy reference %f eV calculated %f" (get_mean_energy standard_temperature |> joules_to_electron_volts);
-    [%expect {| mean energy reference 0.038538 eV calculated 0.038538 |}]
+    |> printf "mean energy reference %f eV calculated %f eV" (get_mean_energy standard_temperature |> joules_to_electron_volts);
+    [%expect {| mean energy reference 0.038538 eV calculated 0.038538 eV |}]
 
   let%expect_test "get_energy_probability check most probable energy" =
     let temperature = 100.0 in
@@ -981,56 +998,335 @@ module Gases = struct
     printf "ref: %f calc %f err %f" most_probable_energy_ref most_probable_energy (abs (most_probable_energy_ref - most_probable_energy));
     [%expect {| ref: 0.004309 calc 0.004309 err 0.000000 |}]
 
-    (**
-      Accepts five arguments:
-      * [a] the van der Waals' a constant for the gas
-      * [b] the van der Waals' b constant for the gas
-      * [n] the number of moles
-      * [volume] the number of liters
-      * [temperature] the temperature (K)
-      and uses the van der Waals equation of state to calculate the pressure
-      of the gas.
+  (**
+    Accepts two argumnets: [temperature], measured in Kelvins; and [energy],
+    measured in electron volts; and returns the proportion of molecules
+    in an ideal gas (following a Boltzman distribution) that have kinetic
+    energy less than or equal to [energy].
+
+    WARNING: this function relies on the Boltzman distribution which assumes
+    that the number of quantum states available to the molecules in the
+    gas is significantly greater than the number of molecules. That is,
+    this equation breaks down when the gas temperature approaches zero K.
+
+    Note: this function is equivalent to:
+
+    [
+      (2.0/(jt*sqrt(pi*jt))) *
+      (Integrate.qag () ~lower:0.0 ~upper:energy ~f:(fun e ->
+        sqrt(e)*(exp(-e/(jt)))
+      )).out
+    ]
+  *)
+  let get_proportion_molecules_lte_energy ~temperature ~energy =
+    let k = boltzmann_constant in
+    let j = joules_to_electron_volts k in
+    let jt = j*temperature in
+    (2.0/(jt*sqrt(pi*jt))) *
+    (
+      (((sqrt pi)*(expt jt (3//2))*(Erf.f (sqrt (energy/jt))))/2.0)
+      - (jt*(sqrt energy)*(exp (-energy/jt)))
+    )
+
+  let%expect_test "get_proportion_molecules_lte_energy" =
+    let temperature = 100.0 in
+    (*
+      In Maxima: quantile_gamma (0.5, 3/2, 0.00861703057313708588);
+      where the constant equals: 100 * joules_to_electron_volts boltzmann_constant
     *)
-    let van_der_waals_pressure ~a ~b ~n ~volume ~temperature =
-      let r = gas_constant_atm_liters
-      in
-      (n*r*temperature*(square volume) - a*(square n)*volume + a*b*(pow_int n 3))/
-      (pow_int volume 3 - b*n*square volume)
+    let median_energy = 0.0101938346484531 in
+    get_proportion_molecules_lte_energy ~temperature ~energy:median_energy
+    |> printf "%f";
+    [%expect {| 0.500000 |}]
 
-    let%expect_test "van_der_waals_pressure" =
-      van_der_waals_pressure ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~temperature:295.13
-      |> printf "%f";
-      [%expect {| 13.553739 |}]
+  (**
+    Accepts five arguments:
+    * [a] the van der Waals' a constant for the gas
+    * [b] the van der Waals' b constant for the gas
+    * [n] the number of moles
+    * [volume] the number of liters
+    * [temperature] the temperature (K)
+    and uses the van der Waals equation of state to calculate the pressure
+    of the gas in atmospheres.
 
-    (**
-      The van_der_waals_volume is cubic in volume.contents
+    "Real gases differ in their behavior from that represented by the
+    perfect-gas equation for two reasons. First, the molecules have a
+    definite size, so that each molecule prevents others from making use
+    of a part of the volume of the gas container. This causes the volume
+    of a gas to be larger than that calculated for ideal behavior. Second,
+    the molecules even when some distance apart do not move independently
+    of one another, but attract one another slightly. This tends to cause
+    the pressure of a gas to be smaller than the calculated pressure." [1],
+    pg 334. This function uses the empirical van der Waals Equation of
+    State to account for these factors.
+  *)
+  let van_der_waals_pressure ~a ~b ~n ~volume ~temperature =
+    let r = gas_constant_atm_liters
+    in
+    (n*r*temperature*(square volume) - a*(square n)*volume + a*b*(pow_int n 3))/
+    (pow_int volume 3 - b*n*square volume)
 
-      pv^3 - (nrt+npb)v^2 + n^2av - n^3ab = 0
-    *)
-    let van_der_waals_volume ~a ~b ~n ~pressure:(p:float) ~temperature:(t:float) =
-      let r = gas_constant_atm_liters in
-      let result = Polynomial.Cubic.solve
-        (- (n*r*t + n*p*b)/p)
-        ((square n)*a/p)
-        (- (pow_int n 3)*a*b/p)
-      in if not @@ [%equal: int] result.n 1
-      then failwiths ~here:[%here] "Error: tried to calculate the volume of a gas using the van der Waals equation of state and the equation did not have a unique real solution." (a, b, n, p, t) [%sexp_of: float * float * float * float * float]
-      else result.x0
+  let%expect_test "van_der_waals_pressure" =
+    van_der_waals_pressure ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~temperature:295.13
+    |> printf "%f";
+    [%expect {| 13.553739 |}]
 
-    let%expect_test "van_der_waals_volume" =
-      van_der_waals_volume ~a:1.39 ~b:0.0391 ~n:1.3 ~pressure:13.553739 ~temperature:295.13
-      |> printf "%f";
-      [%expect {| 2.300000 |}]
+  (**
+    The van_der_waals_volume is cubic in volume.
 
-    let van_der_waals_temperature ~a ~b ~n ~volume ~pressure =
-      (pressure + (square n)*a/(square volume))*(volume - n*b)/
-      (n*gas_constant_atm_liters)
+    pv^3 - (nrt+npb)v^2 + n^2av - n^3ab = 0
 
-    let%expect_test "van_der_waals_temperature" =
-      van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
-      |> printf "%f";
-      [%expect {| 295.130004 |}]
+    "Real gases differ in their behavior from that represented by the
+    perfect-gas equation for two reasons. First, the molecules have a
+    definite size, so that each molecule prevents others from making use
+    of a part of the volume of the gas container. This causes the volume
+    of a gas to be larger than that calculated for ideal behavior. Second,
+    the molecules even when some distance apart do not move independently
+    of one another, but attract one another slightly. This tends to cause
+    the pressure of a gas to be smaller than the calculated pressure." [1],
+    pg 334. This function uses the empirical van der Waals Equation of
+    State to account for these factors.
+  *)
+  let van_der_waals_volume ~a ~b ~n ~pressure:(p:float) ~temperature:(t:float) =
+    let r = gas_constant_atm_liters in
+    let result = Polynomial.Cubic.solve
+      (- (n*r*t + n*p*b)/p)
+      ((square n)*a/p)
+      (- (pow_int n 3)*a*b/p)
+    in if not @@ [%equal: int] result.n 1
+    then failwiths ~here:[%here] "Error: tried to calculate the volume of a gas using the van der Waals equation of state and the equation did not have a unique real solution." (a, b, n, p, t) [%sexp_of: float * float * float * float * float]
+    else result.x0
 
+  let%expect_test "van_der_waals_volume" =
+    van_der_waals_volume ~a:1.39 ~b:0.0391 ~n:1.3 ~pressure:13.553739 ~temperature:295.13
+    |> printf "%f";
+    [%expect {| 2.300000 |}]
+
+  (**
+    "Real gases differ in their behavior from that represented by the
+    perfect-gas equation for two reasons. First, the molecules have a
+    definite size, so that each molecule prevents others from making use
+    of a part of the volume of the gas container. This causes the volume
+    of a gas to be larger than that calculated for ideal behavior. Second,
+    the molecules even when some distance apart do not move independently
+    of one another, but attract one another slightly. This tends to cause
+    the pressure of a gas to be smaller than the calculated pressure." [1],
+    pg 334. This function uses the empirical van der Waals Equation of
+    State to account for these factors.
+  *)
+  let van_der_waals_temperature ~a ~b ~n ~volume ~pressure =
+    (pressure + (square n)*a/(square volume))*(volume - n*b)/
+    (n*gas_constant_atm_liters)
+
+  let%expect_test "van_der_waals_temperature" =
+    van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
+    |> printf "%f";
+    [%expect {| 295.130004 |}]
+
+  (**
+    Accepts three arguments: [mass], the mass of a particle such as an
+    electron, a proton, or a molecule measured in kilograms; [volume], the
+    cubic volume of some space measured in cubic meters (m^3); and [energy],
+    an energy threshold measured in joules; and returns the
+    number of quantum states that the described particle can occupy within
+    the [volume] while having energy less than or equal to [energy].
+
+    Note: This function only considers the set of allowed wavelengths/
+    frequencies that the particle can have. Following the Einstein equation
+    where kinetic energy is proportional to wavelength for photons and the
+    De Broglie equation which says that the momentum of a particle is related
+    to its wavelength. Thus, this function computes the momentum energy states
+    of a particle.
+    
+    If you are dealing with an electron, you must also consider the spin states
+    (you need to double the number of states returned by this function).
+    
+    If you are dealing with a molecule that has two or more atoms, you will
+    need to consider the oscillation energies as the oscillate towards each
+    other and out from each other as though connected by a spring. You will
+    also have to consider the rotation of the molecule as it tumbles. These
+    rotations are quantized. Additionally, you will want to consider the
+    pendulum like wiggling of the atoms.
+    
+    Note also that we derive this equation by considering the wavelengths
+    available to a "particle in a (cubic) box". The waveforms allowed are
+    linear combinations of sine curves whose wavelengths are integer multiples
+    of the box width.
+
+    WARNING: if you are dealing with electrons, which have an additional
+    quantum state property - spin, you must double the number of states
+    returned by this function.
+
+    WARNING: if you are dealing with multiple particles, this function does
+    not take into account the symmetry requirements associated with fermions
+    (antisymmetric) and bosons (symmetric). Sets of identical bosons can only
+    occupy those linear combinations of wave states that are symmetric -
+    i.e. when you permute the assignment of particles to different states
+    you get the same wave amplitude. Fermions are similarly restricted to
+    those linear combinations where permutations invert the wave amplitude.
+
+    See: "Statistical Mechanice Fermions and Bosons"
+    https://asc.ohio-state.edu/jayaprakash.1/846/ferminotes.pdf
+  *)
+  let get_num_energy_states_lte_energy ~mass ~volume energy =
+    (8.0 * pi * sqrt(2.0) * (pow_int (sqrt(mass*energy)) 3) * volume)/
+    (3.0 * pow_int plancks_constant 3)
+
+  (**
+    Accepts three arguments: [mass], measured in kg; [volume], measured in
+    cubic liters; and [temperature], measured in kelvins; and returns an
+    approximation of the number of translational kinetic states available
+    to particles within an ideal gas confined to a cubic volume of size
+    [volume] where each particle has mass [mass] and the gas is at temperature
+    [temperature].
+
+    Note: this function relies on the classical Maxwell-Boltzmann statistics
+    which is only valid for high temperatures where the number of particles
+    so much smaller than the number of quantum states that the symmetry
+    constraints imposed on fermions and bosons can be neglected due to the
+    infrequency with which two particles may share the same quantum state.
+
+    See: [1], Appendix XII, page 922.
+  *)
+  let get_boltzmann_multiplicity ~mass ~volume temperature =
+    (exp (3//2)*volume*(pow_int (sqrt (2.0 * pi * boltzmann_constant * temperature * mass))) 3)/pow_int plancks_constant 3
+
+  (**
+    Accepts two arguments: [num_states], the multiplicity or the number
+    of quantum states that can be occupied by particles; [num_particles],
+    the number of particles; and returns an approximation of the entropy of
+    [num_particles] in an ideal gas filling a volume that has [num_states]
+    quantum states available.
+
+    Note: this function is derived from the boltzmann entropy formula `s = k ln
+    W` where `W = w^n/N!` by using stirling's approximation for the factorial
+    expression. It is only valid when the number of particles is large.
+
+    See: [1] Appendix XII, page 921.
+  *)
+  let get_entropy_high_temp_approx ~num_states num_particles =
+    let r = num_particles * boltzmann_constant in
+    r*(log num_states) - r*(log num_particles) + r
+
+
+  (**
+    Accepts four arguments: [mass], the mass of individual particle measured
+    in kg; [volume], the cubic volume enclosing the ideal gas measured
+    in m^3; [temperature], the temperature of the gas measured in k; and
+    [num_particles], the number of particles in the ideal gas; and returns
+    an approximation of the entropy of the gas.contents
+    
+    Note: this gas uses an approximation of the entropy equation that relies
+    on the stirling approximation for factorials which is only valid when
+    the number of particles is large.
+
+    Note: this function relies on the Maxwell-Boltzmann statistics which are
+    only valid when the number of quantum states available to the gas particles
+    (the multiplicity) is so much larger than the number of particles that we
+    can neglect the symmetry constraints associated with fermions and bosons.
+
+    Note this function is equivalent to: [get_entropy_high_temp_approx
+    ~num_states:get_boltzmann_multiplicity].
+
+    See: [1] Appendix XII, page 922.
+  *)
+  let get_sackur_tetrode_entropy ~mass ~volume ~temperature num_particles =
+    let r = num_particles * boltzmann_constant in
+    (3//2)*r*log mass +
+    (3//2)*r*log temperature +
+    r*log volume -
+    r*log num_particles +
+    (5//2)*r +
+    (3//2)*r*log ((2.0*pi*boltzmann_constant)/square plancks_constant)
+
+  let%expect_test "get_sackur_tetrode_entropy" =
+    let total_num_molecules = mole in
+    (* helium *)
+    (* convert liters to cubic meters *)
+    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:0.0341 ~b:0.0237 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature in
+    let helium_molecule_mass_kg = 4.002602 / (1_000.0 * mole) in
+    get_sackur_tetrode_entropy ~mass:helium_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
+    |> printf "estimated helium entropy %f\n";
+    printf "entropy published by NIST (https://webbook.nist.gov/cgi/inchi?ID=C7440597&Mask=1#Thermo-Gas): 126.153 j mol^-1 k^-1\n";
+    (* xenon *)
+    (* convert liters to cubic meters *)
+    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:4.19 ~b:0.0550 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature in
+    let xenon_molecule_mass_kg =  131.30/(1_000.0 * mole) in
+    get_sackur_tetrode_entropy ~mass:xenon_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
+    |> printf "estimated xenon entropy %f\n";
+    printf "entropy published by NIST: 169.685 j mol^-1 k^-1\n";
+    (* methane *)
+    (* convert liters to cubic meters *)
+    (* Note: the NIST measurement was taken at 1 atm not 1 bar like the others. *)
+    (* Note: we expect to see our function underestimate the amount of entropy for methane because we do not account for rotational and vibrational entropy. *)
+    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:2.25 ~b:0.0428 ~n:1.0 ~pressure:1.0 ~temperature:standard_temperature in
+    let methane_molecule_mass_kg = 16.0425/(1_000.0 * mole) in
+    get_sackur_tetrode_entropy ~mass:methane_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
+    |> printf "estimated methane entropy %f\n";
+    printf "entropy published by NIST: 188.66 j mol^-1 k^-1\n";
+    [%expect {|
+      estimated helium entropy 126.158809
+      entropy published by NIST (https://webbook.nist.gov/cgi/inchi?ID=C7440597&Mask=1#Thermo-Gas): 126.153 j mol^-1 k^-1
+      estimated xenon entropy 169.645839
+      entropy published by NIST: 169.685 j mol^-1 k^-1
+      estimated methane entropy 143.449543
+      entropy published by NIST: 188.66 j mol^-1 k^-1
+      |}]
+
+  (**
+    Accepts one argument: the number of quantum states that a system (a
+    particle or a collection of particles) can occupy; and returns the
+    entropy of the system measured in joules per kelvin.
+  *)
+  let get_entropy num_states =
+    boltzmann_constant * log num_states
+
+  let get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy =
+    let num_energy_bands = 1_000 in
+    let delta_energy = max_energy / float num_energy_bands in
+    let h = plancks_constant
+    and k = boltzmann_constant in
+    let kt = k*temperature
+    in
+    let get_num_energy_states energy =
+      (Integrate.qag () ~lower:energy ~upper:(energy + delta_energy) ~f:(fun e ->
+        (4.0*pi*(sqrt(2.0*e))*(pow_int (sqrt mass) 3)*volume)/(pow_int h 3)
+      )).out
+    in
+    let get_num_particles energy =
+      num_particles * (Integrate.qag () ~lower:energy ~upper:(energy + delta_energy) ~f:(fun e ->
+        (2.0*(sqrt e)*(exp (-e/kt)))/(kt*sqrt(pi*kt))
+      )).out
+    in
+    let total_entropy = ref 0.0 in
+    for i = 0 to Int.(num_energy_bands - 1) do
+      let energy = float i * delta_energy in
+      let wi = get_num_energy_states energy
+      and ni = get_num_particles energy in
+      if Int.(i % 100 = 0) then (
+        printf "i = %d energy lower = %f energy upper = %f num energy states: %f\n" i energy (energy + delta_energy) wi;
+        printf "i = %d energy lower = %f energy upper = %f num particles: %f\n" i energy (energy + delta_energy) ni;
+      );
+      total_entropy := !total_entropy + ni*(log wi - log ni - 1.0)
+    done;
+    boltzmann_constant * !total_entropy
+
+  let%expect_test "get_entropy_alt" =
+    let temperature = standard_temperature
+    and num_particles = mole
+    (* one mole of helium gas at 1 bar and standard temperature *)
+    (* and volume = (1.0/1_000.0) * van_der_waals_volume ~a:0.0341 ~b:0.0237 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature *)
+    (* and mass = 4.002602 / (1_000.0 * mole) *)
+    (* xenon gas *)
+    and volume = (1.0/1_000.0) * van_der_waals_volume ~a:4.19 ~b:0.0550 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature
+    and mass =  131.30/(1_000.0 * mole)
+    in
+    let mean_energy = get_mean_energy temperature in
+    let max_energy = 60.0 * mean_energy
+    in
+    get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy
+    |> printf "%f";
+    [%expect {||}]
 end
 
 module Schrodinger = struct

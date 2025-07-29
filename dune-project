@@ -18,7 +18,7 @@
   ppx_jane
   ppx_here
   eio_main
-  (ocaml_math (= 2.1.0))
+  (ocaml_math (= 2.4.0))
   conf-gsl
  )
 )
