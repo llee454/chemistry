@@ -1208,6 +1208,61 @@ module Gases = struct
     let r = num_particles * boltzmann_constant in
     r*(log num_states) - r*(log num_particles) + r
 
+  (**
+    Accepts four arguments:
+
+    * [num_energy_levels], the number of quantum energy levels that will
+      be considered
+    * [f], a function that accepts a quantum level and returns the
+      corresponding energy of a particle in that quantum level measured
+      in joules;
+    * [temperature], the temperature of the ideal gas measured in Kelvins;
+    * and [energy], the energy associated with an energy level;
+    
+    and returns the probability that a particle will have the
+    given energy in an ideal gas at the given temperature. 
+
+    Note: this function uses the Boltzman energy distribution formula which
+    is only valid for relatively high temperatures.
+
+    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
+  *)
+  let get_energy_state_probability ~num_energy_levels ~f ~temperature energy =
+    let kt = boltzmann_constant * temperature
+    and acc = ref 0.0 in
+    for i = 0 to Int.(num_energy_levels - 1) do
+      acc := !acc + exp (-(f i)/kt)
+    done;
+    exp (-energy/kt)/(!acc)
+
+  (**
+    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
+  *)
+  let get_mean_energy_alt ~num_energy_levels ~f temperature =
+    let acc = ref 0.0 in
+    for i = 0 to Int.(num_energy_levels - 1) do
+      let energy = f i in
+      let probability = get_energy_state_probability ~num_energy_levels ~f ~temperature energy in
+      printf "i: %i energy: %f probability: %f\n" i energy probability;
+      acc := !acc + energy*probability
+    done;
+    !acc
+
+  let%expect_test "get_energy_state_probability" =
+    let temperature = 10.0
+    (* the moment of inertia for a HCl molecule *)
+    and moment_inertia = 2.65e-47 (* kg m^2 *)
+    in
+    (* calculate the rotational energy given the angular momentum level j *)
+    let get_energy j =
+      ((float Int.(j*(j + 1)))*(square planck_bar))/(2.0*moment_inertia)
+    in
+    printf "diff energy %f\n" (((get_energy 1) - (get_energy 0)) * 1e22); 
+    let reference = 3.0*30.4*(exp (-30.4/temperature))/(1.0 + 3.0*(exp (-30.4/temperature)))
+    and calculated = get_mean_energy_alt ~num_energy_levels:10 ~f:get_energy temperature in
+    printf "ref %f res %f ratio %f" reference calculated (calculated/reference);
+    [%expect {||}]
+
 
   (**
     Accepts four arguments: [mass], the mass of individual particle measured
@@ -1269,9 +1324,62 @@ module Gases = struct
       entropy published by NIST (https://webbook.nist.gov/cgi/inchi?ID=C7440597&Mask=1#Thermo-Gas): 126.153 j mol^-1 k^-1
       estimated xenon entropy 169.645839
       entropy published by NIST: 169.685 j mol^-1 k^-1
-      estimated methane entropy 143.449543
+      estimated methane entropy 143.339878
       entropy published by NIST: 188.66 j mol^-1 k^-1
       |}]
+
+  (**
+    Accepts three arguments:
+
+    * [mass0] the mass of the first atom in Kg
+    * [mass1] the mass of the second atom in Kg
+    * [r] the distance between the two atoms in meters
+
+    and returns the inertial moment of the described diatomic molecule in
+    kg m^2.
+  *)
+  let get_inertial_moment ~mass0 ~mass1 r =
+    let r0 = r*mass1/(mass0 + mass1) in
+    let r1 = r - r0 in
+    mass0*(square r0) + mass1*(square r1)
+
+  let%expect_test "get_inertial_moment" =
+    let hydrogen_mass_kg = 1.00797 / (1_000.0 * mole) in
+    angstroms_to_meters 0.742
+    |> get_inertial_moment ~mass0:hydrogen_mass_kg ~mass1:hydrogen_mass_kg
+    |> ( * ) 1e48
+    |> printf "%fE48";
+    [%expect {| 4.607017E48 |}]
+
+  (**
+    Accepts four arguments:
+
+    * [symmetrical] - true iff the two atoms in the molecule are identical. For
+      example, O2.
+    * [inertial_moment] - the inertial moment measured in kg m^2.
+    * [num_moles] - the number of molecules measured in moles
+    * [temperature] - the temperature measured in Kelvins
+
+    and returns the entropy stemming from the rotation of the described
+    diatomic molecules in a mole of a gas having the given temperature.
+
+    WARNING: this function is only valid when the temperature is high enough
+    that the heat capacity of the gas is approximately R.
+  *)
+  let get_diatomic_rotational_entropy ~(symmetrical:bool) ~inertial_moment:(i:float) t =
+    let k = boltzmann_constant in
+    let r = k*mole in
+    let s = if symmetrical then 2.0 else 1.0 in
+    r*(1.0 + log t - ((2.0 * log planck_bar) - log (2.0 * i * k)) - log s)
+
+  let%expect_test "get_diatomic_rotational_energy" =
+    let hydrogen_mass_kg = 1.00797 / (1_000.0 * mole) in
+    let inertial_moment = angstroms_to_meters 0.742
+      |> get_inertial_moment ~mass0:hydrogen_mass_kg ~mass1:hydrogen_mass_kg
+    in
+    get_diatomic_rotational_entropy ~symmetrical:true ~inertial_moment 500.0
+    |> printf "%f";
+    [%expect {| 17.050024 |}]
 
   (**
     Accepts one argument: the number of quantum states that a system (a
@@ -1281,6 +1389,9 @@ module Gases = struct
   let get_entropy num_states =
     boltzmann_constant * log num_states
 
+  (**
+    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
+  *)
   let get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy =
     let num_energy_bands = 1_000 in
     let delta_energy = max_energy / float num_energy_bands in
@@ -1304,8 +1415,8 @@ module Gases = struct
       let wi = get_num_energy_states energy
       and ni = get_num_particles energy in
       if Int.(i % 100 = 0) then (
-        printf "i = %d energy lower = %f energy upper = %f num energy states: %f\n" i energy (energy + delta_energy) wi;
-        printf "i = %d energy lower = %f energy upper = %f num particles: %f\n" i energy (energy + delta_energy) ni;
+        (* printf "i = %d energy lower = %f energy upper = %f num energy states: %f\n" i energy (energy + delta_energy) wi; *)
+        (* printf "i = %d energy lower = %f energy upper = %f num particles: %f\n" i energy (energy + delta_energy) ni; *)
       );
       total_entropy := !total_entropy + ni*(log wi - log ni - 1.0)
     done;
@@ -1326,7 +1437,7 @@ module Gases = struct
     in
     get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy
     |> printf "%f";
-    [%expect {||}]
+    [%expect {| 153.019407 |}]
 end
 
 module Schrodinger = struct
