@@ -25,6 +25,4 @@ let () =
   done;
   printf !"estimated excited orbit's principal quantum number: %d\n" (fst (Option.value_exn !acc))
 *)
-let () =
-  printf !"Test: %f\n" Chemistry.(angstrom_to_meters (Measurement.Cast (1.0, ([Angstrom], []))));
-
+let () = printf !"Test: %f\n" Chemistry.(angstrom_to_meters (Measurement.Cast (1.0, ([ Angstrom ], []))))

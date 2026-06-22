@@ -1,4 +1,4 @@
-(lang dune 3.16)
+(lang dune 3.23)
 (name chemistry)
 (license GPL-3.0)
 (authors "Larry D. Lee Jr. <llee454@gmail.com>")
@@ -20,6 +20,7 @@
   eio_main
   (ocaml_math (= 2.4.0))
   conf-gsl
+  bignum
  )
 )
 (using coq 0.2)

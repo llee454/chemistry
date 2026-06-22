@@ -19,6 +19,7 @@ depends: [
   "eio_main"
   "ocaml_math" {= "2.4.0"}
   "conf-gsl"
+  "bignum"
   "odoc" {with-doc}
 ]
 build: [
@@ -38,5 +39,5 @@ build: [
 dev-repo: "git+https://github.com/llee454/chemistry.git"
 pin-depends: [
 #  ["ocaml_math.2.4.0" "git+https://github.com/llee454/ocaml_math.git"]
- ["ocaml_math.2.4.0" "git+file:///home/larry/Projects/asemio_stats"]
+ ["ocaml_math.2.4.0" "git+file:///home/larry/Projects/ocaml_math"]
 ]

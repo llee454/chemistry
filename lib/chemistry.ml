@@ -79,10 +79,6 @@ let joules_to_electron_volts x = x / electron_volt
 *)
 let atmospheres_to_joule_liters atm = 101.325 * atm
 
-let atmospheres_to_bars atm = 1.01325 * atm
-
-let bars_to_atmosphers bar = bar/1.01325
-
 (**
   Accepts the [mass], measured in Kg, and [energy], measured in j, of a
   moving particle; and returns its velocity in m/s.
@@ -131,6 +127,12 @@ let%expect_test "photon_energy" =
   |> printf "%0.4f eV";
   [%expect {| 10.1968 eV |}]
 
+(**
+  Accepts the velocity of an electron and returns its De Broglie
+  wavelength.
+*)
+let de_broglie_wavelength velocity = plancks_constant / (electron_mass_kg * velocity)
+
 let%expect_test "energy_of_photon" =
   let v = 650e-9 in
   light_wavelength_to_frequncy v |> photon_energy |> ( * ) 1e19 |> printf "%0.2fx10^19 J";
@@ -143,15 +145,6 @@ let%expect_test "orbit_transition" =
   |> ( * ) 1e18
   |> printf "%0.2fx10^18 J";
   [%expect {| 1.63x10^18 J |}]
-
-let de_broglie_wavelength ~mass velocity =
-  plancks_constant / (mass * velocity)
-
-(**
-  Accepts the velocity of an electron and returns its De Broglie
-  wavelength.
-*)
-let electron_de_broglie_wavelength velocity = plancks_constant / (electron_mass_kg * velocity)
 
 (**
   Equations from the Bohr model.
@@ -403,7 +396,7 @@ module Electronegativity = struct
       and f Nonlinear_fit.{ks; x} =
         match ks with
         | [| k0; k1 |] ->
-          k0 * cdf_gaussian_p ~x:(log (k1 * x)) ~std:1.0
+          k0 * Stats.cdf_gaussian_p ~x:(log (k1 * x)) ~std:1.0
         | _ -> failwiths ~here:[%here] "Error: an internal error occured." ks [%sexp_of: float array]
       in
       let xs = Array.init n ~f:(fun i -> empirical_degree_ionic.(i).(0))
@@ -435,7 +428,7 @@ module Electronegativity = struct
         let k0 = 1.8615176504138462
         and k1 = 0.32202559402545522
         in
-        k0 * cdf_gaussian_p ~x:(log (k1 * electronegativity_diff)) ~std:1.0
+        k0 * Stats.cdf_gaussian_p ~x:(log (k1 * electronegativity_diff)) ~std:1.0
 
     let%expect_test "get_approx_degree_ionic" =
       Array.map empirical_degree_ionic ~f:(function
@@ -512,7 +505,7 @@ module Heat_of_formation = struct
     A molecule; and [x1], the electronegativity of a B molecule.
   
     Note: this function returns an empirical approximation that is
-    (* generally accurate to within 3 kJ mole^-1. *)
+    generally accurate to within 3 kJ mole^-1.
 
     WARNING: when breaking bonds, generally, the amount of energy
     needed will differ. For example: to break the H-O bond in
@@ -636,6 +629,15 @@ module Electroneutrality = struct
     } [@@deriving sexp]
   end
 
+  (**
+    Note: an electron configuration matrix gives the number of electrons
+    shared between atoms. The i,j entry tells us how many **pairs** of
+    electrons are shared between atoms i and j. Thus, if i,j = 1 we know
+    that atoms i and j share a covalent bond. For diagonal elements i,i
+    the calculation is a little different. These entries tell us how many
+    valence electrons remain unshared by the i-th atom. Notice that each
+    increment correponds to a **single** electron.
+  *)
   module Electron_configuration_vector = struct
     (**
       Accepts an electron configuration vector and returns the number of atoms represented.
@@ -648,17 +650,25 @@ module Electroneutrality = struct
       Float.iround_nearest_exn @@ (sqrt (8.0*float n + 1.0) - 1.0)/2.0
 
     (**
+      Accepts [num_atoms] and returns the number of entries that are in the
+      electron configuration vector associated with the electron configuration
+      matrix.
+    *)
+    let get_num_entries num_atoms =
+      Int.(num_atoms*(num_atoms + 1)/2)
+
+    (**
       Accepts three arguments: [n], the number of atoms in an electron
       configuration matrix; [i], a row index; [j], a column index; and returns
       the index of the corresponding element within the associated electron
       configuration vector.
     *)
-    let get_index n i j =
+    let get_index num_atoms i j =
       let open Int in
       let k = min i j
       and l = max i j
       in
-      k*n - (k*(k + 1))/2 + l
+      k*num_atoms - (k*(k + 1))/2 + l
 
     (*
       [| 0.0; 1.0; 2.0;
@@ -677,6 +687,68 @@ module Electroneutrality = struct
       ]
       |> printf !"%{sexp: int list}";
       [%expect {| (0 3 5 4 2 1 4) |}]
+
+    (**
+      Accepts two arguments: [num] the number of atoms in the electron
+      configuration vector; and [index], an offset into the vector; and
+      returns the corresponding row within the configuration matrix.
+    *)
+    let get_row num index =
+      let n = float num
+      and i = float index
+      in
+      (1.0 + 2.0*n - sqrt(4.0*square n + 4.0*n - 8.0*i + 1.0))/2.0
+      |> Float.iround_down_exn
+
+    let%expect_test "get_row" =
+      [
+        get_row 5 0;
+        get_row 5 4;
+        get_row 5 5;
+        get_row 5 6;
+        get_row 5 9;
+        get_row 5 8;
+        get_row 5 14;
+      ]
+      |> printf !"%{sexp: int list}";
+      [%expect {| (0 0 1 1 2 1 4) |}]
+
+    let get_row_start num row = 
+      let i = float row in
+      Float.to_int @@ (float num)*i + (i - square i)/2.0
+
+    let%expect_test "get_row" =
+      [
+        get_row_start 5 0;
+        get_row_start 5 1;
+        get_row_start 5 2;
+        get_row_start 5 3;
+        get_row_start 5 4;
+      ]
+      |> printf !"%{sexp: int list}";
+      [%expect {| (0 5 9 12 14) |}]
+
+    (**
+      Accepts two arguments [num], the number of atoms; and [index], an index
+      into a electron configuration vector; and returns the corresponding
+      row and column in the associated configuration matrix.
+    *)
+    let get_row_column num_atoms index =
+      let open Int in
+      let row = get_row num_atoms index in
+      (row, index - get_row_start num_atoms row + row)
+
+    let%expect_test "get_row" =
+      [
+        get_row_column 5 0;
+        get_row_column 5 7;
+        get_row_column 5 9;
+        get_row_column 5 12;
+        get_row_column 5 13;
+        get_row_column 5 14;
+      ]
+      |> printf !"%{sexp: (int * int) list}";
+      [%expect {| ((0 0) (1 3) (2 2) (3 3) (3 4) (4 4)) |}]
 
     (**
       Accepts an electron configuration vector and returns the corresponding
@@ -745,6 +817,392 @@ module Electroneutrality = struct
       |] |> printf !"%{sexp: float array}";
       [%expect {| (1.0695658090848179 0.060284980182740575) |}]
   end
+
+  (**
+    This module uses a genetic algorithm to find the electron configuration
+    that maximizes electroneutrality.
+  *)
+  module Genetic = struct
+    open Int
+
+    (**
+      Accepts two arguments: [len], the number of elements; and [sum]; and
+      returns a random vector that has [len] elements that sum to [sum].
+      
+      Note: this function assigns a uniform probability across all elements.
+    *)
+    let random_vector ~len sum =
+      let xs = Array.create ~len 0 in
+      for _ = 0 to sum - 1 do
+        let i = Random.int len in
+        xs.(i) <- xs.(i) + 1
+      done;
+      xs
+
+    let%expect_test "random_vector_balanced" =
+      printf !"%{sexp: int array}" (random_vector ~len:5 15);
+      [%expect {| (4 3 2 2 4) |}] 
+
+    (**
+      Fillable vector.
+
+      We have a vector where we will repeatedly select a random slot and,
+      if the slot is not "filled," we will add an additional new element to
+      the slot. We want to do this efficiently, i.e. we want avoid randomly
+      selecting slots that are already "filled" and we want to ensure that
+      the process gives as uniform a probability distribution over all slots
+      as possible.
+
+      We create a binary tree over all of the slots. The leaves represent
+      slots and report two values, the number of elements inserted and the
+      number of elements that can be inserted before the slot is "filled." The
+      nodes report the number of slots leaves/slots below them that are
+      available/not filled.
+
+      Each iteration, we look at the root node and choose a number less than or
+      equal to the number of available slots. We then walk through the tree to
+      find the nth slot, insert our element, and recursively update the nodes.
+    *)
+    module Tree = struct
+      type 'a t =
+      | Node of {
+        num: int; (** the number of leaves in this tree *)
+        mutable num_available: int; (** the number of unfilled leaves in this tree *)
+        left: 'a t;
+        right_opt: 'a t option }
+      | Leaf of { mutable value: 'a; mutable full: bool }
+      [@@deriving sexp]
+    end
+
+    (**
+      Accepts a fillable tree and returns a sequence of the leaf values in
+      left-most order.
+    *)
+    let rec get_leaves : 'a Tree.t -> 'a Sequence.t = function
+    | Tree.Leaf info -> Sequence.singleton info.value
+    | Tree.Node info ->
+      Sequence.append
+        (get_leaves info.left)
+        (Option.value_map info.right_opt ~default:Sequence.empty ~f:(fun right ->
+          get_leaves right
+        ))
+
+    (** Returns the number of leaves in the given tree. *)
+    let get_num = function
+    | Tree.Node info -> info.num
+    | Tree.Leaf _ -> 1
+
+     (**
+       Accepts a tree and returns the number of leafs that are not full
+       within it.
+     *)
+     let get_num_available = function
+     | Tree.Node info -> info.num_available
+     | Tree.Leaf info -> if info.full then 0 else 1
+
+    (**
+      Accepts two arguments: [f], a function that accepts a slot index and
+      returns the slot's data; and [num]; and creates a fillable vector tree
+      that has [num] slots.
+    *)
+    let rec create ~f num =
+      if num = 0
+      then None
+      else Some (create_aux ~f 0 num)
+
+    and create_aux ~f start num =
+      let depth = float num |> log2 |> Float.iround_up_exn in
+      if depth = 0
+      then Tree.Leaf { value = f start; full = false }
+      else begin
+        let num_right = num / 2 in
+        let num_left  = num - num_right in
+        let left = create_aux ~f start num_left
+        and right_opt =
+          if num_right = 0
+          then None
+          else Some (create_aux ~f (start + num_left) num_right)
+        in
+        Tree.Node { num; num_available = num; left; right_opt }
+      end
+
+    let%expect_test "create" =
+      create 5 ~f:(fun i -> i) |> printf !"%{sexp: int Tree.t option}"; 
+      [%expect {|
+        ((Node (num 5) (num_available 5)
+          (left
+           (Node (num 3) (num_available 3)
+            (left
+             (Node (num 2) (num_available 2) (left (Leaf (value 0) (full false)))
+              (right_opt ((Leaf (value 1) (full false))))))
+            (right_opt ((Leaf (value 2) (full false))))))
+          (right_opt
+           ((Node (num 2) (num_available 2) (left (Leaf (value 3) (full false)))
+             (right_opt ((Leaf (value 4) (full false)))))))))
+        |}]
+
+    module Tree_update_op = struct
+      (**
+        Indicates whether or not a tree update filled a slot, unfilled a
+        slot, or had no impact on the number of filled slots.
+      *)
+      type t = Filled | Unfilled | Noop
+      [@@deriving sexp]
+    end
+
+    (** 
+      Accepts four arguments: [f], a function that accepts a slot value, and
+      returns a new slot value; [is_full], another function that accepts a
+      slot value and returns true iff the slot is "full"; [i], a slot index;
+      and [tree], a fillable vector tree; and updates the i-th slot's value
+      using [f].
+
+      If, after the update, the slot is full according to [is_full], this
+      function marks the slot as full and updates the ancestor nodes
+      accordingly.
+
+      If the [unfilled_only] flag is set to true, the index [i] refers to the
+      "i-th unfilled slot." Exercise care, when using this flag as the i-th
+      unfilled slot may change as slots are filled and unfilled.
+    *)
+    let rec update ?(unfilled_only = false) ~f ~is_full i tree =
+      let _ = update_aux ~unfilled_only ~f ~is_full i tree in ()
+
+    and update_aux ?(unfilled_only = false) ~f ~is_full i = function
+      | Tree.Leaf info ->
+        if i = 0
+        then begin
+          info.value <- f info.value;
+          let full = is_full info.value in
+          let res = match info.full, full with
+          | true, false -> Tree_update_op.Unfilled
+          | false, true -> Tree_update_op.Filled
+          | _ -> Tree_update_op.Noop
+          in
+          info.full  <- full;
+          res
+        end else failwiths ~here:[%here] "Error: an error occured while trying to update a fillable vector tree. Invalid index." i [%sexp_of: int]
+      | Tree.Node info ->
+        let num_left = if unfilled_only
+          then get_num_available info.left
+          else get_num info.left
+        in
+        let filled_slot = if i < num_left
+          then update_aux ~unfilled_only ~f ~is_full i info.left
+          else begin
+            match info.right_opt with 
+            | None -> failwiths ~here:[%here] "Error: an error occured while trying to update a fillable vector tree. Invalid index." i [%sexp_of: int]
+            | Some right -> update_aux ~unfilled_only ~f ~is_full (i - num_left) right
+          end
+        in
+        let () = match filled_slot with
+          | Tree_update_op.Filled -> info.num_available <- info.num_available - 1
+          | Tree_update_op.Unfilled -> info.num_available <- info.num_available + 1
+          | _ -> ()
+        in
+        filled_slot
+
+    let%expect_test "create" =
+      let tree = create 5 ~f:(fun i -> i) |> Option.value_exn in
+      update 0 tree ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      update 4 tree ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      update 1 tree ~unfilled_only:true ~f:(fun x -> 2*x) ~is_full:(Fn.const true);
+      printf !"%{sexp: int Tree.t}" tree;
+      [%expect {|
+        (Node (num 5) (num_available 2)
+         (left
+          (Node (num 3) (num_available 1)
+           (left
+            (Node (num 2) (num_available 1) (left (Leaf (value 0) (full true)))
+             (right_opt ((Leaf (value 1) (full false))))))
+           (right_opt ((Leaf (value 4) (full true))))))
+         (right_opt
+          ((Node (num 2) (num_available 1) (left (Leaf (value 3) (full false)))
+            (right_opt ((Leaf (value 8) (full true))))))))
+        |}]
+
+    module Electron_configuration_vector_tree = struct
+      (**
+        Represents the information stored within the leaves of an electron
+        configuration vector tree.
+      *)
+      type t = {
+        index: int;
+        num_electrons: int
+      }
+      [@@deriving sexp]
+    end
+
+    (**
+      Accepts an array of atom descriptions and an electron configuration
+      vector tree that describes a distribution of electrons between those
+      atoms and returns the square sum of the charge distribution of that
+      electron distribution.
+    *)
+    let get_charge_square_sum atoms tree =
+      get_leaves tree
+      |> Sequence.map ~f:(fun (info : Electron_configuration_vector_tree.t) -> info.num_electrons)
+      |> Sequence.to_array
+      |> Electron_configuration_vector.get_charge_square_sum atoms
+
+    (**
+      Accepts one argument [num_atoms] and returns an empty electron
+      configuration vector tree with slots for [num_atoms] atoms - i.e. to
+      describe the number of electrons shared between [num_atoms].
+    *)
+    let create_electron_configuration_vector_tree num_atoms =
+      Electron_configuration_vector.get_num_entries num_atoms
+      |> create ~f:(fun index -> Electron_configuration_vector_tree.{index; num_electrons = 0 })
+
+    (**
+      Accepts three arguments: [num_atoms], an integer that specifies how many
+      atoms are associated with the given electron configuration vector tree;
+      [atom_index], the index of the atom whose tree entries will be marked as
+      full; and [tree], an electron configuration vector tree; and marks the
+      entries in [tree] that are associated with the referenced atom as full.
+    *)
+    let mark_atom_as_full ~num_atoms atom_index tree =
+      for r = 0 to atom_index do
+        update (Electron_configuration_vector.get_index num_atoms r atom_index) tree
+          ~f:(Fn.id) ~is_full:(Fn.const true)
+      done;
+      for c = atom_index + 1 to num_atoms - 1 do
+        update (Electron_configuration_vector.get_index num_atoms atom_index c) tree
+          ~f:(Fn.id) ~is_full:(Fn.const true)
+      done
+
+    (**
+      Accepts three arguments: [atoms_num_valence_electrons], an array that
+      lists the number of valence electrons available for each atom; [i];
+      and [tree], an electron configuration vector tree; adds an electron
+      to the i-th available/unfilled slot within [tree] and decrements the
+      number of available valence electrons in [atoms_num_valence_electrons].
+    *)
+    let add_electron atoms_num_valence_electrons i tree =
+      if get_num_available tree <= i then failwiths ~here:[%here] "Error: an error occured while trying to add an electron to an electron configuration vector tree. The given index is invalid. The tree does not have enough unfilled slots." (i, tree) [%sexp_of: int * Electron_configuration_vector_tree.t Tree.t];
+      let num_atoms = Array.length atoms_num_valence_electrons in
+      update i tree ~unfilled_only:true ~f:(fun (info : Electron_configuration_vector_tree.t) ->
+          { info with num_electrons = info.num_electrons + 1 }
+        )
+        ~is_full:(fun (info : Electron_configuration_vector_tree.t) ->
+          let row, col = Electron_configuration_vector.get_row_column num_atoms info.index in
+          atoms_num_valence_electrons.(row) <- atoms_num_valence_electrons.(row) - 1;
+          (*
+            Note: off-diagonal entries within the electron configuration
+            matrix correspond to shared pairs of electrons - i.e. to covalent
+            bonds. Diagonal entries correspond to unshared valence 
+          *)
+          if not (row = col) then atoms_num_valence_electrons.(col) <- atoms_num_valence_electrons.(col) - 1;
+          let atom0_is_filled = atoms_num_valence_electrons.(row) = 0
+          and atom1_is_filled = atoms_num_valence_electrons.(col) = 0
+          in
+          if atom0_is_filled then mark_atom_as_full ~num_atoms row tree;
+          if atom1_is_filled && not (row = col) then mark_atom_as_full ~num_atoms col tree;
+          atom0_is_filled || atom1_is_filled
+        )
+
+    (**
+      Accepts an array of atom descriptions and returns a randomly generated
+      electron assignment along with its charge distribution's square sum.
+
+      Note: this function selects electron distributions randomly where each
+      distribution has an equal chance of being chosen.
+    *)
+    let create_random_electron_assignment atoms =
+      let num_valence_electrons = Array.map atoms ~f:(fun (atom : Atom.t) -> atom.num_valence_electrons) in
+      let num_atoms = Array.length num_valence_electrons in
+      let tree = create_electron_configuration_vector_tree num_atoms |> Option.value_exn in
+      let electron_assignment = Queue.create () in
+      while Array.sum (module Int) num_valence_electrons ~f:(Fn.id) > 0 do
+        let i = Random.int (get_num_available tree) in
+        Queue.enqueue electron_assignment i;
+        add_electron num_valence_electrons i tree
+      done;
+      (Queue.to_array electron_assignment, get_charge_square_sum atoms tree)
+
+    let%expect_test "create_random_electron_assignment" =
+      let atoms = [|
+        Atom.{ num_valence_electrons = 2; electronegativity = 1.5 }; (* Be *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 4; electronegativity = 2.5 } (* C *)
+      |]
+      in
+      let (assignment, charge) = create_random_electron_assignment atoms in
+      printf !"%{sexp: int array * float}" (assignment, charge);
+      [%expect {| ((9 4 1 0 0 0 0) 0.017390946570718588) |}]
+
+    (**
+      Accepts four arguments: [mutation_rate], [atoms], [assignment0]
+      and [assignment1]; generates an electron assignment by randomly
+      selecting electron assignments from assignment0 and assigment1 where
+      [mutation_rate] determines the probability that the function will
+      insert a random electron assignment. It then returns the generated
+      assignment along with the assignment's charge distribution's square sum.
+      
+      If at some point, this function does not have an assignment available
+      from one of the two given it will randomly assign the electron.
+    *)
+    let randomly_merge_electron_assignments mutation_rate atoms assignment0 assignment1 =
+      let assignment0_len = Array.length assignment0
+      and assignment1_len = Array.length assignment1
+      in
+      let num_valence_electrons = Array.map atoms ~f:(fun (atom : Atom.t) -> atom.num_valence_electrons) in
+      let num_atoms = Array.length num_valence_electrons in
+      let tree = create_electron_configuration_vector_tree num_atoms |> Option.value_exn in
+      let electron_assignment = Queue.create ()
+      and index = ref (-1)
+      in
+      while Array.sum (module Int) num_valence_electrons ~f:(Fn.id) > 0 do
+        index := succ !index;
+        let num_available = get_num_available tree in
+        (* splice or mutate randomly *)
+        let i =
+          if Float.(Random.float 1.0 <= mutation_rate)
+          then Random.int num_available
+          else 
+            match Random.bool () with
+            | true  when !index < assignment0_len -> assignment0.(!index)
+            | false when !index < assignment1_len -> assignment1.(!index)
+            | _ -> Random.int num_available
+        in
+        Queue.enqueue electron_assignment i;
+        add_electron num_valence_electrons i tree
+      done;
+      (Queue.to_array electron_assignment, get_charge_square_sum atoms tree)
+
+    let%expect_test "randomly_merge_electron_assignments" =
+      let atoms = [|
+        Atom.{ num_valence_electrons = 2; electronegativity = 1.5 }; (* Be *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 1; electronegativity = 2.1 }; (* H *)
+        Atom.{ num_valence_electrons = 4; electronegativity = 2.5 } (* C *)
+      |]
+      in
+      let (assignment0, charge0) = create_random_electron_assignment atoms
+      and (assignment1, charge1) = create_random_electron_assignment atoms in
+      let (assignment, charge) = randomly_merge_electron_assignments 0.1 atoms assignment0 assignment1 in
+      [
+        (assignment0, charge0);
+        (assignment1, charge1);
+        (assignment, charge)
+      ]
+      |> printf !"%{sexp: (int array * float) list}";
+      [%expect {||}]
+      
+          
+
+    (**
+      Accepts a list [atoms] where each element is an integer specifying
+      how many valence electrons the ith element has; and returns a random
+      electron configuration vector.
+    *)
+    (* let create_random_electron_config atoms =
+      let atoms_len = Array.length atoms in
+      let len = Int.(atoms_len * (atoms_len + 1)/2) in
+      let xs = Array.create ~len 0 in *)
+      
+  end
 end
 
 module Bond_length = struct
@@ -807,7 +1265,7 @@ module Bond_length = struct
     to be "partially" double, triple, etc.
   *)
   let get_bond_length ?(degree = 1.0) x y =
-    mean [| x; y |] - get_shortening degree
+    Stats.mean [| x; y |] - get_shortening degree
 
   let get_bond_length_simple ?degree x y =
     get_bond_length ?degree (Core.Map.find_exn bond_lengths x) (Core.Map.find_exn bond_lengths y)
@@ -946,40 +1404,30 @@ module Gases = struct
     measured in electron volts; and returns the probability density that
     a randomly selected molecule from an ideal gas will have the given
     energy.
-
-    WARNING: this function relies on the Boltzman distribution which assumes
-    that the number of quantum states available to the molecules in the
-    gas is significantly greater than the number of molecules. That is,
-    this equation breaks down when the gas temperature approaches zero K.
-
-    Note: this function works with extremely small numbers which led to
-    numerical instability. To improve numerical stability, we switch from
-    joules to electron volts.
-
-    Note: this function is equivalent to:
-
-    [
-      let k = boltzmann_constant in
-      let j = joules_to_electron_volts k in
-      let jt = j*temperature in
-      (2.0/jt) * sqrt (energy/(pi*jt)) * exp (-energy/jt)
-    ]
-
-    See: Wikipedia: Maxwell-Boltzmann distribution
   *)
   let get_energy_probability ~temperature ~energy =
-    pdf_gamma ~a:(3//2) ~b:((joules_to_electron_volts boltzmann_constant)*temperature) energy
+    let k = 13.805E-24 in
+    (*
+      boltzmann's constant expressed as electron volts per degree.
+
+      Note: this function works with extremely small numbers which led to
+      numerical instability. To improve numerical stability, we switch from
+      joules to electron volts.
+    *)
+    let j = joules_to_electron_volts k in
+    let jt = j*temperature in
+    (2.0/jt) * sqrt (energy/(pi*jt)) * exp (-energy/jt)
 
   let%expect_test "get_energy_probability check mean energy" =
     (Integrate.qag () ~f:(fun energy ->
         energy * get_energy_probability ~temperature:standard_temperature ~energy
       ) ~lower:0.0 ~upper:1.00).out
-    |> printf "mean energy reference %f eV calculated %f eV" (get_mean_energy standard_temperature |> joules_to_electron_volts);
-    [%expect {| mean energy reference 0.038538 eV calculated 0.038538 eV |}]
+    |> printf "mean energy reference %f eV calculated %f" (get_mean_energy standard_temperature |> joules_to_electron_volts);
+    [%expect {| mean energy reference 0.038538 eV calculated 0.038538 |}]
 
   let%expect_test "get_energy_probability check most probable energy" =
     let temperature = 100.0 in
-    let module SA = Simulated_annealing (struct
+    let module SA = Simulated_annealing.Simulated_annealing (struct
       type t = float
 
       let copy x = x
@@ -998,446 +1446,56 @@ module Gases = struct
     printf "ref: %f calc %f err %f" most_probable_energy_ref most_probable_energy (abs (most_probable_energy_ref - most_probable_energy));
     [%expect {| ref: 0.004309 calc 0.004309 err 0.000000 |}]
 
-  (**
-    Accepts two argumnets: [temperature], measured in Kelvins; and [energy],
-    measured in electron volts; and returns the proportion of molecules
-    in an ideal gas (following a Boltzman distribution) that have kinetic
-    energy less than or equal to [energy].
-
-    WARNING: this function relies on the Boltzman distribution which assumes
-    that the number of quantum states available to the molecules in the
-    gas is significantly greater than the number of molecules. That is,
-    this equation breaks down when the gas temperature approaches zero K.
-
-    Note: this function is equivalent to:
-
-    [
-      (2.0/(jt*sqrt(pi*jt))) *
-      (Integrate.qag () ~lower:0.0 ~upper:energy ~f:(fun e ->
-        sqrt(e)*(exp(-e/(jt)))
-      )).out
-    ]
-  *)
-  let get_proportion_molecules_lte_energy ~temperature ~energy =
-    let k = boltzmann_constant in
-    let j = joules_to_electron_volts k in
-    let jt = j*temperature in
-    (2.0/(jt*sqrt(pi*jt))) *
-    (
-      (((sqrt pi)*(expt jt (3//2))*(Erf.f (sqrt (energy/jt))))/2.0)
-      - (jt*(sqrt energy)*(exp (-energy/jt)))
-    )
-
-  let%expect_test "get_proportion_molecules_lte_energy" =
-    let temperature = 100.0 in
-    (*
-      In Maxima: quantile_gamma (0.5, 3/2, 0.00861703057313708588);
-      where the constant equals: 100 * joules_to_electron_volts boltzmann_constant
+    (**
+      Accepts five arguments:
+      * [a] the van der Waals' a constant for the gas
+      * [b] the van der Waals' b constant for the gas
+      * [n] the number of moles
+      * [volume] the number of liters
+      * [temperature] the temperature (K)
+      and uses the van der Waals equation of state to calculate the pressure
+      of the gas.
     *)
-    let median_energy = 0.0101938346484531 in
-    get_proportion_molecules_lte_energy ~temperature ~energy:median_energy
-    |> printf "%f";
-    [%expect {| 0.500000 |}]
+    let van_der_waals_pressure ~a ~b ~n ~volume ~temperature =
+      let r = gas_constant_atm_liters
+      in
+      (n*r*temperature*(square volume) - a*(square n)*volume + a*b*(pow_int n 3))/
+      (pow_int volume 3 - b*n*square volume)
 
-  (**
-    Accepts five arguments:
-    * [a] the van der Waals' a constant for the gas
-    * [b] the van der Waals' b constant for the gas
-    * [n] the number of moles
-    * [volume] the number of liters
-    * [temperature] the temperature (K)
-    and uses the van der Waals equation of state to calculate the pressure
-    of the gas in atmospheres.
+    let%expect_test "van_der_waals_pressure" =
+      van_der_waals_pressure ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~temperature:295.13
+      |> printf "%f";
+      [%expect {| 13.553739 |}]
 
-    "Real gases differ in their behavior from that represented by the
-    perfect-gas equation for two reasons. First, the molecules have a
-    definite size, so that each molecule prevents others from making use
-    of a part of the volume of the gas container. This causes the volume
-    of a gas to be larger than that calculated for ideal behavior. Second,
-    the molecules even when some distance apart do not move independently
-    of one another, but attract one another slightly. This tends to cause
-    the pressure of a gas to be smaller than the calculated pressure." [1],
-    pg 334. This function uses the empirical van der Waals Equation of
-    State to account for these factors.
-  *)
-  let van_der_waals_pressure ~a ~b ~n ~volume ~temperature =
-    let r = gas_constant_atm_liters
-    in
-    (n*r*temperature*(square volume) - a*(square n)*volume + a*b*(pow_int n 3))/
-    (pow_int volume 3 - b*n*square volume)
+    (**
+      The van_der_waals_volume is cubic in volume.contents
 
-  let%expect_test "van_der_waals_pressure" =
-    van_der_waals_pressure ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~temperature:295.13
-    |> printf "%f";
-    [%expect {| 13.553739 |}]
+      pv^3 - (nrt+npb)v^2 + n^2av - n^3ab = 0
+    *)
+    let van_der_waals_volume ~a ~b ~n ~pressure:(p:float) ~temperature:(t:float) =
+      let r = gas_constant_atm_liters in
+      let result = Polynomial.Cubic.solve
+        (- (n*r*t + n*p*b)/p)
+        ((square n)*a/p)
+        (- (pow_int n 3)*a*b/p)
+      in if not @@ [%equal: int] result.n 1
+      then failwiths ~here:[%here] "Error: tried to calculate the volume of a gas using the van der Waals equation of state and the equation did not have a unique real solution." (a, b, n, p, t) [%sexp_of: float * float * float * float * float]
+      else result.x0
 
-  (**
-    The van_der_waals_volume is cubic in volume.
+    let%expect_test "van_der_waals_volume" =
+      van_der_waals_volume ~a:1.39 ~b:0.0391 ~n:1.3 ~pressure:13.553739 ~temperature:295.13
+      |> printf "%f";
+      [%expect {| 2.300000 |}]
 
-    pv^3 - (nrt+npb)v^2 + n^2av - n^3ab = 0
+    let van_der_waals_temperature ~a ~b ~n ~volume ~pressure =
+      (pressure + (square n)*a/(square volume))*(volume - n*b)/
+      (n*gas_constant_atm_liters)
 
-    "Real gases differ in their behavior from that represented by the
-    perfect-gas equation for two reasons. First, the molecules have a
-    definite size, so that each molecule prevents others from making use
-    of a part of the volume of the gas container. This causes the volume
-    of a gas to be larger than that calculated for ideal behavior. Second,
-    the molecules even when some distance apart do not move independently
-    of one another, but attract one another slightly. This tends to cause
-    the pressure of a gas to be smaller than the calculated pressure." [1],
-    pg 334. This function uses the empirical van der Waals Equation of
-    State to account for these factors.
-  *)
-  let van_der_waals_volume ~a ~b ~n ~pressure:(p:float) ~temperature:(t:float) =
-    let r = gas_constant_atm_liters in
-    let result = Polynomial.Cubic.solve
-      (- (n*r*t + n*p*b)/p)
-      ((square n)*a/p)
-      (- (pow_int n 3)*a*b/p)
-    in if not @@ [%equal: int] result.n 1
-    then failwiths ~here:[%here] "Error: tried to calculate the volume of a gas using the van der Waals equation of state and the equation did not have a unique real solution." (a, b, n, p, t) [%sexp_of: float * float * float * float * float]
-    else result.x0
+    let%expect_test "van_der_waals_temperature" =
+      van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
+      |> printf "%f";
+      [%expect {| 295.130004 |}]
 
-  let%expect_test "van_der_waals_volume" =
-    van_der_waals_volume ~a:1.39 ~b:0.0391 ~n:1.3 ~pressure:13.553739 ~temperature:295.13
-    |> printf "%f";
-    [%expect {| 2.300000 |}]
-
-  (**
-    "Real gases differ in their behavior from that represented by the
-    perfect-gas equation for two reasons. First, the molecules have a
-    definite size, so that each molecule prevents others from making use
-    of a part of the volume of the gas container. This causes the volume
-    of a gas to be larger than that calculated for ideal behavior. Second,
-    the molecules even when some distance apart do not move independently
-    of one another, but attract one another slightly. This tends to cause
-    the pressure of a gas to be smaller than the calculated pressure." [1],
-    pg 334. This function uses the empirical van der Waals Equation of
-    State to account for these factors.
-  *)
-  let van_der_waals_temperature ~a ~b ~n ~volume ~pressure =
-    (pressure + (square n)*a/(square volume))*(volume - n*b)/
-    (n*gas_constant_atm_liters)
-
-  let%expect_test "van_der_waals_temperature" =
-    van_der_waals_temperature ~a:1.39 ~b:0.0391 ~n:1.3 ~volume:2.3 ~pressure:13.553739
-    |> printf "%f";
-    [%expect {| 295.130004 |}]
-
-  (**
-    Accepts three arguments: [mass], the mass of a particle such as an
-    electron, a proton, or a molecule measured in kilograms; [volume], the
-    cubic volume of some space measured in cubic meters (m^3); and [energy],
-    an energy threshold measured in joules; and returns the
-    number of quantum states that the described particle can occupy within
-    the [volume] while having energy less than or equal to [energy].
-
-    Note: This function only considers the set of allowed wavelengths/
-    frequencies that the particle can have. Following the Einstein equation
-    where kinetic energy is proportional to wavelength for photons and the
-    De Broglie equation which says that the momentum of a particle is related
-    to its wavelength. Thus, this function computes the momentum energy states
-    of a particle.
-    
-    If you are dealing with an electron, you must also consider the spin states
-    (you need to double the number of states returned by this function).
-    
-    If you are dealing with a molecule that has two or more atoms, you will
-    need to consider the oscillation energies as the oscillate towards each
-    other and out from each other as though connected by a spring. You will
-    also have to consider the rotation of the molecule as it tumbles. These
-    rotations are quantized. Additionally, you will want to consider the
-    pendulum like wiggling of the atoms.
-    
-    Note also that we derive this equation by considering the wavelengths
-    available to a "particle in a (cubic) box". The waveforms allowed are
-    linear combinations of sine curves whose wavelengths are integer multiples
-    of the box width.
-
-    WARNING: if you are dealing with electrons, which have an additional
-    quantum state property - spin, you must double the number of states
-    returned by this function.
-
-    WARNING: if you are dealing with multiple particles, this function does
-    not take into account the symmetry requirements associated with fermions
-    (antisymmetric) and bosons (symmetric). Sets of identical bosons can only
-    occupy those linear combinations of wave states that are symmetric -
-    i.e. when you permute the assignment of particles to different states
-    you get the same wave amplitude. Fermions are similarly restricted to
-    those linear combinations where permutations invert the wave amplitude.
-
-    See: "Statistical Mechanice Fermions and Bosons"
-    https://asc.ohio-state.edu/jayaprakash.1/846/ferminotes.pdf
-  *)
-  let get_num_energy_states_lte_energy ~mass ~volume energy =
-    (8.0 * pi * sqrt(2.0) * (pow_int (sqrt(mass*energy)) 3) * volume)/
-    (3.0 * pow_int plancks_constant 3)
-
-  (**
-    Accepts three arguments: [mass], measured in kg; [volume], measured in
-    cubic liters; and [temperature], measured in kelvins; and returns an
-    approximation of the number of translational kinetic states available
-    to particles within an ideal gas confined to a cubic volume of size
-    [volume] where each particle has mass [mass] and the gas is at temperature
-    [temperature].
-
-    Note: this function relies on the classical Maxwell-Boltzmann statistics
-    which is only valid for high temperatures where the number of particles
-    so much smaller than the number of quantum states that the symmetry
-    constraints imposed on fermions and bosons can be neglected due to the
-    infrequency with which two particles may share the same quantum state.
-
-    See: [1], Appendix XII, page 922.
-  *)
-  let get_boltzmann_multiplicity ~mass ~volume temperature =
-    (exp (3//2)*volume*(pow_int (sqrt (2.0 * pi * boltzmann_constant * temperature * mass))) 3)/pow_int plancks_constant 3
-
-  (**
-    Accepts two arguments: [num_states], the multiplicity or the number
-    of quantum states that can be occupied by particles; [num_particles],
-    the number of particles; and returns an approximation of the entropy of
-    [num_particles] in an ideal gas filling a volume that has [num_states]
-    quantum states available.
-
-    Note: this function is derived from the boltzmann entropy formula `s = k ln
-    W` where `W = w^n/N!` by using stirling's approximation for the factorial
-    expression. It is only valid when the number of particles is large.
-
-    See: [1] Appendix XII, page 921.
-  *)
-  let get_entropy_high_temp_approx ~num_states num_particles =
-    let r = num_particles * boltzmann_constant in
-    r*(log num_states) - r*(log num_particles) + r
-
-  (**
-    Accepts four arguments:
-
-    * [num_energy_levels], the number of quantum energy levels that will
-      be considered
-    * [f], a function that accepts a quantum level and returns the
-      corresponding energy of a particle in that quantum level measured
-      in joules;
-    * [temperature], the temperature of the ideal gas measured in Kelvins;
-    * and [energy], the energy associated with an energy level;
-    
-    and returns the probability that a particle will have the
-    given energy in an ideal gas at the given temperature. 
-
-    Note: this function uses the Boltzman energy distribution formula which
-    is only valid for relatively high temperatures.
-
-    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
-  *)
-  let get_energy_state_probability ~num_energy_levels ~f ~temperature energy =
-    let kt = boltzmann_constant * temperature
-    and acc = ref 0.0 in
-    for i = 0 to Int.(num_energy_levels - 1) do
-      acc := !acc + exp (-(f i)/kt)
-    done;
-    exp (-energy/kt)/(!acc)
-
-  (**
-    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
-  *)
-  let get_mean_energy_alt ~num_energy_levels ~f temperature =
-    let acc = ref 0.0 in
-    for i = 0 to Int.(num_energy_levels - 1) do
-      let energy = f i in
-      let probability = get_energy_state_probability ~num_energy_levels ~f ~temperature energy in
-      printf "i: %i energy: %f probability: %f\n" i energy probability;
-      acc := !acc + energy*probability
-    done;
-    !acc
-
-  let%expect_test "get_energy_state_probability" =
-    let temperature = 10.0
-    (* the moment of inertia for a HCl molecule *)
-    and moment_inertia = 2.65e-47 (* kg m^2 *)
-    in
-    (* calculate the rotational energy given the angular momentum level j *)
-    let get_energy j =
-      ((float Int.(j*(j + 1)))*(square planck_bar))/(2.0*moment_inertia)
-    in
-    printf "diff energy %f\n" (((get_energy 1) - (get_energy 0)) * 1e22); 
-    let reference = 3.0*30.4*(exp (-30.4/temperature))/(1.0 + 3.0*(exp (-30.4/temperature)))
-    and calculated = get_mean_energy_alt ~num_energy_levels:10 ~f:get_energy temperature in
-    printf "ref %f res %f ratio %f" reference calculated (calculated/reference);
-    [%expect {||}]
-
-
-  (**
-    Accepts four arguments: [mass], the mass of individual particle measured
-    in kg; [volume], the cubic volume enclosing the ideal gas measured
-    in m^3; [temperature], the temperature of the gas measured in k; and
-    [num_particles], the number of particles in the ideal gas; and returns
-    an approximation of the entropy of the gas.contents
-    
-    Note: this gas uses an approximation of the entropy equation that relies
-    on the stirling approximation for factorials which is only valid when
-    the number of particles is large.
-
-    Note: this function relies on the Maxwell-Boltzmann statistics which are
-    only valid when the number of quantum states available to the gas particles
-    (the multiplicity) is so much larger than the number of particles that we
-    can neglect the symmetry constraints associated with fermions and bosons.
-
-    Note this function is equivalent to: [get_entropy_high_temp_approx
-    ~num_states:get_boltzmann_multiplicity].
-
-    See: [1] Appendix XII, page 922.
-  *)
-  let get_sackur_tetrode_entropy ~mass ~volume ~temperature num_particles =
-    let r = num_particles * boltzmann_constant in
-    (3//2)*r*log mass +
-    (3//2)*r*log temperature +
-    r*log volume -
-    r*log num_particles +
-    (5//2)*r +
-    (3//2)*r*log ((2.0*pi*boltzmann_constant)/square plancks_constant)
-
-  let%expect_test "get_sackur_tetrode_entropy" =
-    let total_num_molecules = mole in
-    (* helium *)
-    (* convert liters to cubic meters *)
-    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:0.0341 ~b:0.0237 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature in
-    let helium_molecule_mass_kg = 4.002602 / (1_000.0 * mole) in
-    get_sackur_tetrode_entropy ~mass:helium_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
-    |> printf "estimated helium entropy %f\n";
-    printf "entropy published by NIST (https://webbook.nist.gov/cgi/inchi?ID=C7440597&Mask=1#Thermo-Gas): 126.153 j mol^-1 k^-1\n";
-    (* xenon *)
-    (* convert liters to cubic meters *)
-    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:4.19 ~b:0.0550 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature in
-    let xenon_molecule_mass_kg =  131.30/(1_000.0 * mole) in
-    get_sackur_tetrode_entropy ~mass:xenon_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
-    |> printf "estimated xenon entropy %f\n";
-    printf "entropy published by NIST: 169.685 j mol^-1 k^-1\n";
-    (* methane *)
-    (* convert liters to cubic meters *)
-    (* Note: the NIST measurement was taken at 1 atm not 1 bar like the others. *)
-    (* Note: we expect to see our function underestimate the amount of entropy for methane because we do not account for rotational and vibrational entropy. *)
-    let volume = (1.0/1_000.0) * van_der_waals_volume ~a:2.25 ~b:0.0428 ~n:1.0 ~pressure:1.0 ~temperature:standard_temperature in
-    let methane_molecule_mass_kg = 16.0425/(1_000.0 * mole) in
-    get_sackur_tetrode_entropy ~mass:methane_molecule_mass_kg ~volume ~temperature:standard_temperature total_num_molecules
-    |> printf "estimated methane entropy %f\n";
-    printf "entropy published by NIST: 188.66 j mol^-1 k^-1\n";
-    [%expect {|
-      estimated helium entropy 126.158809
-      entropy published by NIST (https://webbook.nist.gov/cgi/inchi?ID=C7440597&Mask=1#Thermo-Gas): 126.153 j mol^-1 k^-1
-      estimated xenon entropy 169.645839
-      entropy published by NIST: 169.685 j mol^-1 k^-1
-      estimated methane entropy 143.339878
-      entropy published by NIST: 188.66 j mol^-1 k^-1
-      |}]
-
-  (**
-    Accepts three arguments:
-
-    * [mass0] the mass of the first atom in Kg
-    * [mass1] the mass of the second atom in Kg
-    * [r] the distance between the two atoms in meters
-
-    and returns the inertial moment of the described diatomic molecule in
-    kg m^2.
-  *)
-  let get_inertial_moment ~mass0 ~mass1 r =
-    let r0 = r*mass1/(mass0 + mass1) in
-    let r1 = r - r0 in
-    mass0*(square r0) + mass1*(square r1)
-
-  let%expect_test "get_inertial_moment" =
-    let hydrogen_mass_kg = 1.00797 / (1_000.0 * mole) in
-    angstroms_to_meters 0.742
-    |> get_inertial_moment ~mass0:hydrogen_mass_kg ~mass1:hydrogen_mass_kg
-    |> ( * ) 1e48
-    |> printf "%fE48";
-    [%expect {| 4.607017E48 |}]
-
-  (**
-    Accepts four arguments:
-
-    * [symmetrical] - true iff the two atoms in the molecule are identical. For
-      example, O2.
-    * [inertial_moment] - the inertial moment measured in kg m^2.
-    * [num_moles] - the number of molecules measured in moles
-    * [temperature] - the temperature measured in Kelvins
-
-    and returns the entropy stemming from the rotation of the described
-    diatomic molecules in a mole of a gas having the given temperature.
-
-    WARNING: this function is only valid when the temperature is high enough
-    that the heat capacity of the gas is approximately R.
-  *)
-  let get_diatomic_rotational_entropy ~(symmetrical:bool) ~inertial_moment:(i:float) t =
-    let k = boltzmann_constant in
-    let r = k*mole in
-    let s = if symmetrical then 2.0 else 1.0 in
-    r*(1.0 + log t - ((2.0 * log planck_bar) - log (2.0 * i * k)) - log s)
-
-  let%expect_test "get_diatomic_rotational_energy" =
-    let hydrogen_mass_kg = 1.00797 / (1_000.0 * mole) in
-    let inertial_moment = angstroms_to_meters 0.742
-      |> get_inertial_moment ~mass0:hydrogen_mass_kg ~mass1:hydrogen_mass_kg
-    in
-    get_diatomic_rotational_entropy ~symmetrical:true ~inertial_moment 500.0
-    |> printf "%f";
-    [%expect {| 17.050024 |}]
-
-  (**
-    Accepts one argument: the number of quantum states that a system (a
-    particle or a collection of particles) can occupy; and returns the
-    entropy of the system measured in joules per kelvin.
-  *)
-  let get_entropy num_states =
-    boltzmann_constant * log num_states
-
-  (**
-    TODO: THIS FUNCTION HAS NOT BEEN VERIFIED YET
-  *)
-  let get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy =
-    let num_energy_bands = 1_000 in
-    let delta_energy = max_energy / float num_energy_bands in
-    let h = plancks_constant
-    and k = boltzmann_constant in
-    let kt = k*temperature
-    in
-    let get_num_energy_states energy =
-      (Integrate.qag () ~lower:energy ~upper:(energy + delta_energy) ~f:(fun e ->
-        (4.0*pi*(sqrt(2.0*e))*(pow_int (sqrt mass) 3)*volume)/(pow_int h 3)
-      )).out
-    in
-    let get_num_particles energy =
-      num_particles * (Integrate.qag () ~lower:energy ~upper:(energy + delta_energy) ~f:(fun e ->
-        (2.0*(sqrt e)*(exp (-e/kt)))/(kt*sqrt(pi*kt))
-      )).out
-    in
-    let total_entropy = ref 0.0 in
-    for i = 0 to Int.(num_energy_bands - 1) do
-      let energy = float i * delta_energy in
-      let wi = get_num_energy_states energy
-      and ni = get_num_particles energy in
-      if Int.(i % 100 = 0) then (
-        (* printf "i = %d energy lower = %f energy upper = %f num energy states: %f\n" i energy (energy + delta_energy) wi; *)
-        (* printf "i = %d energy lower = %f energy upper = %f num particles: %f\n" i energy (energy + delta_energy) ni; *)
-      );
-      total_entropy := !total_entropy + ni*(log wi - log ni - 1.0)
-    done;
-    boltzmann_constant * !total_entropy
-
-  let%expect_test "get_entropy_alt" =
-    let temperature = standard_temperature
-    and num_particles = mole
-    (* one mole of helium gas at 1 bar and standard temperature *)
-    (* and volume = (1.0/1_000.0) * van_der_waals_volume ~a:0.0341 ~b:0.0237 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature *)
-    (* and mass = 4.002602 / (1_000.0 * mole) *)
-    (* xenon gas *)
-    and volume = (1.0/1_000.0) * van_der_waals_volume ~a:4.19 ~b:0.0550 ~n:1.0 ~pressure:(bars_to_atmosphers 1.0) ~temperature:standard_temperature
-    and mass =  131.30/(1_000.0 * mole)
-    in
-    let mean_energy = get_mean_energy temperature in
-    let max_energy = 60.0 * mean_energy
-    in
-    get_entropy_alt ~mass ~volume ~temperature ~num_particles max_energy
-    |> printf "%f";
-    [%expect {| 153.019407 |}]
 end
 
 module Schrodinger = struct
